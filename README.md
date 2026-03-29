@@ -28,7 +28,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) (a Python 
 ## Quick Start
 
 ```bash
-uv sync                                                          # Install dependencies
+uv sync   # Install dependencies
 
 # Step 1: Download all data (7 sources per season)
 uv run python -m src.data.fetch_all --seasons 2016-2025
@@ -37,20 +37,20 @@ uv run python -m src.data.fetch_all --seasons 2016-2025
 uv run python -m src.data.merge
 
 # Step 3: Train MTL
-uv run python -m src.models.mtl.train --config configs/mtl.yaml              # holdout evaluation
-uv run python -m src.models.mtl.train --config configs/mtl.yaml --backtest --device cpu  # rolling backtest
+uv run python -m src.models.mtl.train --config configs/mtl.yaml   # holdout evaluation
+uv run python -m src.models.mtl.train --config configs/mtl.yaml --backtest --device cpu   # rolling backtest
 
 # Step 4: Generate 2026 projections
-uv run python scripts/generate_projections.py                                     # MTL projections
+uv run python scripts/generate_projections.py   # MTL projections
 
 # Step 5 (optional): Fetch public projections and compare
-uv run python -m src.data.fetch_projections --year 2026                           # download Steamer/ZiPS/Bat/BatX
-uv run python scripts/generate_projections.py --with-public                       # side-by-side with public projections
+uv run python -m src.data.fetch_projections --year 2026   # download Steamer/ZiPS/Bat/BatX
+uv run python scripts/generate_projections.py --with-public   # side-by-side with public projections
 
 # Step 6 (optional): Multi-year benchmark vs public projections
-uv run python scripts/benchmark_vs_public.py                                      # full 2022-2025 benchmark
-uv run python scripts/benchmark_vs_public.py --years 2025                         # quick smoke test
-uv run python scripts/benchmark_vs_public.py --with-plots                         # + comparison plots
+uv run python scripts/benchmark_vs_public.py   # full 2022-2025 benchmark
+uv run python scripts/benchmark_vs_public.py --years 2025   # quick smoke test
+uv run python scripts/benchmark_vs_public.py --with-plots   # + comparison plots
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
