@@ -1,0 +1,149 @@
+# Data pipeline configuration
+# ----------------------------
+
+# Historical data range (inclusive)
+start_year: 2016
+end_year: 2025
+
+# Prediction target year
+predict_year: 2026
+
+# Minimum plate appearances per season for inclusion in training
+min_pa_train: 200
+
+# Minimum PA in the data year (end_year) for 2026 prediction candidates
+min_pa_predict: 300
+
+# Chronological split boundaries
+# Features from year Y predict targets from year Y+1
+# Specify test_target_year to auto-derive all splits:
+#   test features = target_year - 1, val = target_year - 2, train_end = target_year - 3
+splits:
+  test_target_year: 2025  # Evaluate on 2025 -> train 2016-2022, val 2023, test 2024
+
+# Target variables (do not reorder)
+targets:
+  - OBP
+  - SLG
+  - HR
+  - R
+  - RBI
+  - SB
+
+# Rate-based targets: convert count targets (HR, R, RBI, SB) to per-PA rates.
+# OBP and SLG are already rates and are left unchanged.
+# At inference, predicted rates are multiplied by projected PA (Marcel formula)
+# to produce counting stat projections.
+# This aligns with how all major projection systems (ZiPS, Steamer, PECOTA, Marcel)
+# decompose predictions into rate × playing time, and naturally handles the 2020
+# shortened season (60 games) since per-PA rates are season-length invariant.
+rate_targets: true
+
+# Shortened seasons: games played (for PA projection scaling only).
+# Players' 2020 PA is scaled to 162-game pace when computing projected PA
+# via the Marcel formula, so that a 250-PA 2020 season is treated as ~675 pace.
+season_games:
+  2020: 60
+
+# Feature groups to include (toggle on/off)
+feature_groups:
+  batting: true           # FanGraphs batting stats + derived rates
+  statcast: true          # Statcast quality metrics (EV, LA, barrel)
+  non_contact: true       # Stabilisation-regressed K%, BB%, HBP% rates
+  sprint_speed: true      # Sprint speed from Baseball Savant
+  bat_speed: true         # Bat speed (2024+ only, imputed for earlier years)
+  park_factors: true      # Ballpark factors
+  team_stats: true        # Team offensive context
+  age: true               # Age and age^2
+  temporal: true          # Multi-year weighted averages and trends
+
+# Additional feature toggles for MTL v2
+feature_options:
+  bat_tracking_extended: true     # Include squared_up/blast/fast-swing and count columns when available
+  expected_contact_stats: true    # Include estimated_*_using_speedangle Statcast aggregates
+  missing_indicators: true        # Add has_<feature> indicators for imputed columns
+  pa_target: true                 # Build target_pa for optional auxiliary exposure task
+
+# Temporal feature weights (for weighted multi-year averages)
+# Weights for Y-1, Y-2, Y-3 (most recent first)
+temporal_weights: [5, 3, 2]
+
+# Per-stat weight overrides based on stabilization research:
+# - Fast-stabilizing (barrel_rate, hard_hit_rate): 6/2/1 (recent year dominates)
+# - Slow-stabilizing (babip, obp): 3/3/3 (equal weighting, high noise per year)
+# Stats not listed here use the default temporal_weights above.
+temporal_stat_weights:
+  babip: [3, 3, 3]
+  obp: [4, 3, 3]
+  sb: [7, 2, 1]              # Post-2023 rule change makes recent year far more informative
+  sb_per_pa: [7, 2, 1]       # Same rationale
+  sb_attempt_rate: [7, 2, 1] # Same rationale
+
+# Features to exclude from the final feature set.
+# Reduces dimensionality by dropping redundant/noisy features.
+# - hard_hit_rate and sweet_spot_rate correlate >0.85 with barrel_rate
+# - Bat speed indicator features are all 0 for 2016-2023 (8/10 years)
+exclude_features:
+  - hard_hit_rate
+  - sweet_spot_rate
+  - has_hard_hit_rate
+  - has_sweet_spot_rate
+  - has_bat_tracking_swings
+  - has_bat_tracking_bbe
+  - has_bat_tracking_blasts
+  - has_bat_tracking_squared_up
+  - has_bat_tracking_fast_swings
+  - has_avg_bat_speed
+  - has_avg_swing_speed
+  - has_blast_rate
+  - has_fast_swing_rate
+  - has_squared_up_rate
+  # Aging delta features hurt benchmark RMSE (+1.04%) — piecewise curves
+  # overfit to assumed patterns on small training set
+  - age_delta_speed
+  - age_delta_power
+  - age_delta_patience
+  # Raw counting stat features — redundant with per-PA rate equivalents
+  # (hr_per_pa, sb_per_pa, cs_rate) and distorted for the 2020 60-game season
+  - hr
+  - sb
+  - cs
+  - team_sb
+  # Raw counting stat temporal features — use per-PA rate temporals instead
+  # (prev_year_hr_per_pa, weighted_avg_hr_per_pa, etc.) which are
+  # season-length invariant and already active in the feature set
+  - prev_year_hr
+  - weighted_avg_hr
+  - trend_hr
+  - prev_year_r
+  - weighted_avg_r
+  - trend_r
+  - prev_year_rbi
+  - weighted_avg_rbi
+  - trend_rbi
+  - prev_year_sb
+  - weighted_avg_sb
+  - trend_sb
+
+# Statcast minimum batted ball events per season
+min_bbe: 50
+
+# Missing data: bat speed imputation
+bat_speed_impute_method: league_median  # league_median or zero
+
+# Raw per-year parquet cache directory
+raw_data_dir: data/raw
+
+# Output paths (relative to project root)
+output:
+  merged_dataset: data/merged_batter_data.parquet
+  feature_matrix: data/feature_matrix.parquet
+  projections: data/projections
+
+# External projection systems for comparison (not used in training)
+external_projections_dir: data/external_projections
+projections:
+  systems: [steamer, zips, thebat, thebatx]
+
+# Reproducibility
+seed: 42

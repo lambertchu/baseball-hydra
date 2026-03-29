@@ -1,0 +1,8 @@
+*.parquet
+*.csv
+*.pkl
+*.pt
+*.json
+*.png
+*.npz
+!.gitignore
