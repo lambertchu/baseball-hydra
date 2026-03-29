@@ -1,0 +1,77 @@
+# MTL Neural Network configuration
+# ----------------------------------
+# Shared-backbone architecture with per-target heads.
+
+model:
+  type: mtl
+
+  # Backbone
+  hidden_dims: [256, 128, 64]
+  head_dim: 32
+  dropouts: [0.3, 0.2, 0.1]
+  use_residual: false
+  use_gated_heads: false
+  two_stage: true  # Rate heads feed into count heads
+  speed_head_indices: [5]  # SB head receives backbone only (no rate predictions)
+  speed_heads_receive_rates: false  # When true, speed heads also receive rate predictions
+
+  # Training
+  batch_size: 64
+  epochs: 200
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 20
+  mixup_alpha: 0.2 # set >0 to enable mixup augmentation
+  recency_decay_lambda: 0.30 # exponential decay for sample weighting (0=disabled, 0.30=~2.3yr half-life)
+
+  # Learning-rate scheduler
+  lr_scheduler:
+    type: cosine_warm # plateau | cosine_warm
+    T_0: 20
+    T_mult: 2
+    eta_min: 0.000001
+    patience: 10
+    factor: 0.5
+    min_lr: 0.000001
+
+  # Stochastic Weight Averaging
+  swa:
+    enabled: false
+    lr: 0.0001
+    epochs: 10
+    anneal_epochs: 5
+
+# Loss function (mse | huber)
+loss:
+  type: huber
+  delta: 2.0 # on z-scored targets: errors beyond 2σ get linear penalty
+  target_winsorize_pct: 0  # 0=disabled; 2=clip to 2nd/98th percentile
+
+# Backtest spec used by --backtest
+backtest:
+  enabled: false
+  folds:
+    - { name: A, train_end: 2019, val_year: 2020, test_year: 2021 }
+    - { name: B, train_end: 2020, val_year: 2021, test_year: 2022 }
+    - { name: C, train_end: 2021, val_year: 2022, test_year: 2023 }
+    - { name: D, train_end: 2022, val_year: 2023, test_year: 2024 }
+    - { name: E, train_end: 2023, val_year: 2024, test_year: 2025 }
+
+# Evaluation
+eval:
+  metrics: [rmse, mae, r2, mape]
+  compare_naive: true
+
+# Output
+output:
+  model_dir: data/models/mtl/
+  report: data/reports/mtl_report.json
+  backtest_report: data/reports/mtl_backtest_report.json
+
+# Reproducibility
+seed: 42
+
+# Multi-seed ensemble
+ensemble:
+  n_seeds: 5       # 1=single model; 5=five-seed ensemble
+  base_seed: 42
