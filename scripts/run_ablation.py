@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,6 +16,7 @@ from src.data.splits import get_production_data
 from src.eval.metrics import rmse
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import TARGET_COLUMNS, TARGET_DISPLAY
+from src.models.mtl.model import MTLEnsembleForecaster, MTLForecaster
 from src.models.utils import align_features
 
 logging.basicConfig(level=logging.WARNING)
@@ -123,20 +123,17 @@ def main() -> None:
 
             X_predict, y_true = extract_xy(predict_df, dc)
 
-            # Train with our custom config (bypass file-based config loading)
-            from src.features.pipeline import extract_xy as _extract_xy
-
             needs_eval = retrain_df["season"].nunique() > 1
             if needs_eval:
                 max_season = retrain_df["season"].max()
                 train_part = retrain_df[retrain_df["season"] != max_season]
                 eval_part = retrain_df[retrain_df["season"] == max_season]
-                X_train, y_train = _extract_xy(train_part, dc)
-                X_eval, y_eval = _extract_xy(eval_part, dc)
+                X_train, y_train = extract_xy(train_part, dc)
+                X_eval, y_eval = extract_xy(eval_part, dc)
                 eval_set = (X_eval, y_eval)
             else:
                 train_part = retrain_df
-                X_train, y_train = _extract_xy(retrain_df, dc)
+                X_train, y_train = extract_xy(retrain_df, dc)
                 eval_set = None
 
             cfg = deepcopy(mc)
@@ -146,10 +143,8 @@ def main() -> None:
             n_seeds = ensemble_cfg.get("n_seeds", 0)
 
             if n_seeds > 1:
-                from src.models.mtl.model import MTLEnsembleForecaster
                 model = MTLEnsembleForecaster(cfg)
             else:
-                from src.models.mtl.model import MTLForecaster
                 model = MTLForecaster(cfg)
 
             season = train_part["season"].values if "season" in train_part.columns else None

@@ -100,18 +100,30 @@ Each row = one player-season. Targets are next-season values.
 | `rbi_per_pa`      | RBI/PA        | RBI per plate appearance (rate decomposition)          |
 | `sb_per_pa`       | SB/PA         | Stolen bases per plate appearance (rate decomposition) |
 | `sb_attempt_rate` | (SB+CS)/PA    | Stolen base attempt rate (willingness to run)          |
+| `ibb_rate`        | IBB/PA        | Intentional walk rate                                  |
+| `ubb_rate`        | (BB-IBB)/PA   | Unintentional walk rate                                |
+| `singles_rate`    | 1B/PA         | Singles rate                                           |
+| `doubles_rate`    | 2B/PA         | Doubles rate                                           |
+| `triples_rate`    | 3B/PA         | Triples rate                                           |
+| `extra_base_rate` | (2B+3B+HR)/PA | Extra-base hit rate                                    |
+| `cs_rate`         | CS/PA         | Caught stealing rate                                   |
 
 ### 4.2 Statcast Quality Features
 
-| Feature             | Description                                 |
-| ------------------- | ------------------------------------------- |
-| `avg_exit_velocity` | Average exit velocity on batted balls (mph) |
-| `ev_p95`            | 95th percentile exit velocity (mph)         |
-| `max_exit_velocity` | Absolute maximum exit velocity (mph)        |
-| `avg_launch_angle`  | Average launch angle (degrees)              |
-| `barrel_rate`       | Barrel rate (% of batted ball events)       |
-| `hard_hit_rate`     | Hard hit rate (EV >= 95 mph)                |
-| `sweet_spot_rate`   | Sweet spot rate (LA 8-32 degrees)           |
+| Feature                                | Description                                                |
+| -------------------------------------- | ---------------------------------------------------------- |
+| `bbe_count`                            | Batted-ball events count                                   |
+| `avg_exit_velocity`                    | Average exit velocity on batted balls (mph)                |
+| `ev_p95`                               | 95th percentile exit velocity (mph)                        |
+| `max_exit_velocity`                    | Absolute maximum exit velocity (mph)                       |
+| `avg_launch_angle`                     | Average launch angle (degrees)                             |
+| `barrel_rate`                          | Barrel rate (% of batted ball events)                      |
+| `hard_hit_rate`                        | Hard hit rate (EV >= 95 mph)                               |
+| `sweet_spot_rate`                      | Sweet spot rate (LA 8-32 degrees)                          |
+| `estimated_woba_using_speedangle`      | Expected wOBA from Statcast speed-angle model              |
+| `estimated_ba_using_speedangle`        | Expected batting average from speed-angle model            |
+| `estimated_slg_using_speedangle`       | Expected slugging from speed-angle model                   |
+| `has_*` (11 indicators)               | Missingness indicators for each Statcast metric above      |
 
 ### 4.2b Non-Contact Features (stabilisation-regressed rates)
 
@@ -158,8 +170,10 @@ Apply regression-to-the-mean using stabilisation points from FanGraphs research.
 | `team_runs_per_game`    | Team's runs scored per game (lineup context)       |
 | `team_ops`              | Team OPS (lineup protection proxy)                 |
 | `team_sb`               | Team stolen bases (running game context)           |
+| `team_sb_per_game`      | Team stolen bases per game                         |
 | `sb_rule_era`           | Binary indicator (1 if season >= 2023 rule change) |
 | `sb_era_x_speed`        | SB rule era × sprint speed interaction             |
+| `sb_era_x_attempt_rate` | SB rule era × SB attempt rate interaction          |
 | `speed_age_interaction` | Sprint speed × (age - 27) for speed-aging decline  |
 
 ### 4.5 Derived / Temporal Features
@@ -235,19 +249,19 @@ Every evaluation run must be compared against the **naive persistence** baseline
 
 ## 7) Current Implementation Status
 
-The project has a full end-to-end pipeline in place: data ingestion, feature engineering, MTL model, evaluation, 2026 predictions, and public projection benchmarking. Current test status: **251 unit tests passing**.
+The project has a full end-to-end pipeline in place: data ingestion, feature engineering, MTL model, evaluation, 2026 predictions, and public projection benchmarking.
 
 ### 7.1 What Was Built
 
-| Component                  | Files                                                       | Tests | Description                                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Data Pipeline**          | `src/data/fetch_*.py`, `merge.py`, `splits.py`              | 42    | FanGraphs + Statcast + speed + context data download, merge on (player_id, season), target alignment (Y+1), chronological splits                                                     |
-| **Feature Engineering**    | `src/features/*.py`                                         | 72    | 138 registered features across 9 groups (~121 after exclusions): batting, statcast, non-contact (stabilisation-regressed), speed, bat speed, age, park factors, team stats, temporal |
-| **Non-Contact**            | `src/features/non_contact.py`                               | 13    | Stabilisation-regressed rates (K%, BB%, HBP%, BABIP, ISO, HR/BBE)                                                                                                                    |
-| **MTL Network**            | `src/models/mtl/`                                           | 94    | Multi-task neural network: three-group rate/count/speed heads, 5-seed ensemble, Huber loss, sample recency weighting, optional target winsorization, holdout/backtest workflows      |
-| **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`              | —     | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots                                                                                                              |
-| **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 30    | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                                   |
-| **Public Projections**     | `src/data/fetch_projections.py`                             | —     | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                                      |
+| Component                  | Files                                                       | Description                                                                                                                                                                |
+| -------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Data Pipeline**          | `src/data/fetch_*.py`, `merge.py`, `splits.py`              | FanGraphs + Statcast + speed + context data download, merge on (player_id, season), target alignment (Y+1), chronological splits                                           |
+| **Feature Engineering**    | `src/features/*.py`                                         | Registered features across 9 groups (some excluded via config): batting, statcast, non-contact (stabilisation-regressed), speed, bat speed, age, park factors, team stats, temporal |
+| **Non-Contact**            | `src/features/non_contact.py`                               | Stabilisation-regressed rates (K%, BB%, HBP%, BABIP, ISO, HR/BBE)                                                                                                          |
+| **MTL Network**            | `src/models/mtl/`                                           | Multi-task neural network: three-group rate/count/speed heads, 5-seed ensemble, Huber loss, sample recency weighting, optional target winsorization, holdout/backtest workflows |
+| **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`              | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots                                                                                                    |
+| **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                          |
+| **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
 
 ### 7.2 Current Reporting Outputs
 
@@ -306,7 +320,7 @@ uv run python scripts/benchmark_vs_public.py --no-retrain                    # S
 uv run python scripts/benchmark_vs_public.py --with-plots                    # + comparison plots
 
 # Tests
-uv run pytest tests/ -v                                   # 251 tests
+uv run pytest tests/ -v
 ```
 
 ---
@@ -350,7 +364,7 @@ baseball-hydra/
 │   │   ├── temporal.py                # Multi-year weighted averages, trends
 │   │   ├── context.py                 # Park factors, team stats, age
 │   │   ├── pipeline.py                # End-to-end feature pipeline
-│   │   └── registry.py                # Feature name registry (138 registered, ~121 after exclusions)
+│   │   └── registry.py                # Feature name registry (some excluded via config)
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── utils.py                   # Shared: align_features, model configs
@@ -394,7 +408,7 @@ baseball-hydra/
 
 ## 10) Testing
 
-251 tests across 7 test files. Run with `uv run pytest tests/`.
+Tests are spread across multiple test files in `tests/`. Run with `uv run pytest tests/`.
 
 Required test coverage:
 
