@@ -14,15 +14,11 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.fetch_projections import (
     DISPLAY_NAMES as PROJ_DISPLAY_NAMES,

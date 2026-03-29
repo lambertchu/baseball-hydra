@@ -74,16 +74,23 @@ def _load_parquet_years(
     return pd.concat(frames, ignore_index=True)
 
 
-def build_id_map(batting_df: pd.DataFrame) -> pd.DataFrame:
+def build_id_map(
+    batting_df: pd.DataFrame,
+    cache_path: str | Path = "data/raw/id_map_cache.parquet",
+) -> pd.DataFrame:
     """Build a FanGraphs IDfg → MLBAM ID mapping table.
 
     Uses pybaseball.playerid_reverse_lookup to map all unique FanGraphs IDs
-    in the batting data to MLBAM IDs used by Statcast.
+    in the batting data to MLBAM IDs used by Statcast. Results are cached
+    to a Parquet file so subsequent runs skip the slow network call. New IDs
+    not present in the cache are looked up and appended.
 
     Parameters
     ----------
     batting_df:
         FanGraphs batting data with an ``idfg`` column.
+    cache_path:
+        Path to the persistent Parquet cache file.
 
     Returns
     -------
@@ -94,6 +101,27 @@ def build_id_map(batting_df: pd.DataFrame) -> pd.DataFrame:
     if _ID_MAP_CACHE is not None:
         return _ID_MAP_CACHE
 
+    fg_ids = set(batting_df["idfg"].dropna().astype(int).unique().tolist())
+
+    # Load existing cache if available
+    cache_file = Path(cache_path)
+    cached = pd.DataFrame()
+    if cache_file.exists():
+        cached = pd.read_parquet(cache_file)
+        cached_ids = set(cached["idfg"].tolist())
+        new_ids = sorted(fg_ids - cached_ids)
+        if not new_ids:
+            logger.info("ID map cache hit — all %d IDs cached", len(fg_ids))
+            _ID_MAP_CACHE = cached[cached["idfg"].isin(fg_ids)].copy()
+            return _ID_MAP_CACHE
+        logger.info(
+            "ID map cache has %d IDs, need %d new lookups",
+            len(cached_ids), len(new_ids),
+        )
+    else:
+        new_ids = sorted(fg_ids)
+        logger.info("No ID map cache — looking up %d FanGraphs IDs …", len(new_ids))
+
     try:
         import pybaseball as pb
     except ImportError as exc:
@@ -101,23 +129,32 @@ def build_id_map(batting_df: pd.DataFrame) -> pd.DataFrame:
             "pybaseball is required for ID mapping. Install with: uv sync"
         ) from exc
 
-    fg_ids = batting_df["idfg"].dropna().astype(int).unique().tolist()
-    logger.info("Building ID map for %d FanGraphs IDs …", len(fg_ids))
+    id_map = pb.playerid_reverse_lookup(new_ids, key_type="fangraphs")
 
-    id_map = pb.playerid_reverse_lookup(fg_ids, key_type="fangraphs")
-
-    result = pd.DataFrame({
+    new_result = pd.DataFrame({
         "idfg": pd.to_numeric(id_map["key_fangraphs"], errors="coerce").astype("Int64"),
         "mlbam_id": pd.to_numeric(id_map["key_mlbam"], errors="coerce").astype("Int64"),
     })
-    result = result.dropna(subset=["idfg", "mlbam_id"])
-    result["idfg"] = result["idfg"].astype(int)
-    result["mlbam_id"] = result["mlbam_id"].astype(int)
-    result = result.drop_duplicates(subset=["idfg"], keep="first")
+    new_result = new_result.dropna(subset=["idfg", "mlbam_id"])
+    new_result["idfg"] = new_result["idfg"].astype(int)
+    new_result["mlbam_id"] = new_result["mlbam_id"].astype(int)
+    new_result = new_result.drop_duplicates(subset=["idfg"], keep="first")
 
-    logger.info("  Mapped %d / %d IDs successfully", len(result), len(fg_ids))
-    _ID_MAP_CACHE = result
-    return result
+    # Merge with existing cache and persist
+    if not cached.empty:
+        result = pd.concat([cached, new_result], ignore_index=True)
+        result = result.drop_duplicates(subset=["idfg"], keep="first")
+    else:
+        result = new_result
+
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    result.to_parquet(cache_file, index=False)
+    logger.info(
+        "  Mapped %d new IDs, %d total cached", len(new_result), len(result),
+    )
+
+    _ID_MAP_CACHE = result[result["idfg"].isin(fg_ids)].copy()
+    return _ID_MAP_CACHE
 
 
 def merge_batting_with_statcast(

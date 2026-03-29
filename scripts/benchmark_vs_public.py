@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -26,9 +25,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.splits import get_production_data
 from src.eval.metrics import compute_metrics

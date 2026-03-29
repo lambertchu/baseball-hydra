@@ -373,7 +373,7 @@ baseball-hydra/
     ├── __init__.py
     ├── test_data_pipeline.py          # Data merging + splits
     ├── test_features.py               # Feature engineering
-    ├── test_contact_features.py       # Non-contact features
+    ├── test_non_contact_features.py   # Non-contact features
     ├── test_mtl.py                   # MTL core tests
     ├── test_backtest.py               # Backtest fold and report behavior
     ├── test_projections.py            # Public projections fetch, load, merge

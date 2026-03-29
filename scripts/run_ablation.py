@@ -64,49 +64,6 @@ def _make_variant(
     return mc, dc
 
 
-def _run_variant(
-    name: str,
-    model_config: dict,
-    data_config: dict,
-    df_featured: pd.DataFrame,
-) -> dict[str, float]:
-    """Run one ablation variant across all eval years, return pooled per-target RMSE."""
-    all_true = []
-    all_pred = []
-
-    for year in _EVAL_YEARS:
-        retrain_df, predict_df = get_production_data(
-            df_featured, end_year=year - 1, target_cols=TARGET_COLUMNS,
-        )
-        predict_df = predict_df.dropna(subset=TARGET_COLUMNS)
-        if "target_pa" in predict_df.columns:
-            predict_df = predict_df[predict_df["target_pa"] >= _MIN_PA].copy()
-
-        X_predict, y_true = extract_xy(predict_df, data_config)
-
-        model = train_model_for_year(
-            "mtl", retrain_df, data_config, _SEED, "cpu",
-        )
-        # Override: use our custom model config instead of the file-based one
-        # We need to train directly since train_model_for_year reads from file
-        # Instead, train manually:
-        pass  # handled below
-
-        all_true.append(y_true.values)
-        X_aligned = align_features(X_predict, model, name)
-        all_pred.append(model.predict(X_aligned).values)
-
-    y_true_pooled = np.concatenate(all_true, axis=0)
-    y_pred_pooled = np.concatenate(all_pred, axis=0)
-
-    result = {}
-    for i, target in enumerate(TARGET_DISPLAY):
-        result[target] = rmse(y_true_pooled[:, i], y_pred_pooled[:, i])
-    result["Mean"] = float(np.mean(list(result.values())))
-    result["n"] = len(y_true_pooled)
-    return result
-
-
 def main() -> None:
     print("Loading data and building features ...")
     base_mc, base_dc = _load_configs()
