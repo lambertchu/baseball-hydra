@@ -4,6 +4,8 @@
 
 Baseball Hydra predicts next-season batter stats — OBP, SLG, HR, R, RBI, and SB — by training a multi-task learning (MTL) neural network on a decade of historical performance, Statcast batted-ball data, sprint and bat speed metrics, ballpark factors, and team context. The codebase was developed using Claude Code.
 
+[Here's the link](https://lambertchu.com/blog/vibe-coding-baseball) to my blog post describing my process of building this model.
+
 ### Why multi-task learning?
 
 Traditional projection systems model each stat independently. MTL trains a single neural network with a shared backbone that feeds into stat-specific prediction heads, so the model learns cross-stat relationships automatically: exit velocity informs HR projections, sprint speed shapes SB predictions, and OBP context flows into R and RBI estimates. The result is a model where improving one prediction can improve them all.
@@ -19,7 +21,7 @@ Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
 | Steamer     | 0.0294 | 0.0602 | 7.96 | 20.94 | 21.55 | 6.53 | 9.512     |
 | Last season | 0.0352 | 0.0726 | 8.65 | 22.37 | 23.23 | 7.35 | 10.284    |
 
-**2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RMSE, with the largest gains on counting stats (HR, R, RBI) where MTL's cross-stat sharing matters most.
+**2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RMSE, with the largest gains on counting stats (R and RBI).
 
 ## Prerequisites
 
@@ -71,10 +73,10 @@ the naive persistence baseline (Y+1 = Y).
 | Group            | Features                                                                                                                                                                                                                | Count        |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | **Batting**      | pa, bb_rate, k_rate, iso, babip, avg, obp, slg, hr, sb, cs, sb_rate, woba, wrc_plus, hbp_rate, contact_rate, per-PA rates (hr, r, rbi, sb, sb_attempt), ibb_rate, ubb_rate, singles/doubles/triples/extra_base/cs rates | 28           |
-| **Statcast**     | avg_exit_velocity, ev_p95, max_exit_velocity, avg_launch_angle, barrel_rate, hard_hit_rate, sweet_spot_rate, xwOBA/xBA/xSLG, bbe_count + 11 has_\* indicators                                                           | 22           |
+| **Statcast**     | avg_exit_velocity, ev_p95, max_exit_velocity, avg_launch_angle, barrel_rate, hard_hit_rate, sweet_spot_rate, xwOBA/xBA/xSLG, bbe_count + 11 has_\* indicators                                                          | 22           |
 | **Non-Contact**  | regressed k_rate/bb_rate/hbp_rate/babip/iso/hr_per_bbe                                                                                                                                                                  | 6            |
 | **Sprint Speed** | sprint_speed, has_sprint_speed                                                                                                                                                                                          | 2            |
-| **Bat Speed**    | avg_bat_speed, avg_swing_speed, squared_up/blast/fast_swing rates, tracking counts + 10 has_\* indicators                                                                                                               | 20           |
+| **Bat Speed**    | avg_bat_speed, avg_swing_speed, squared_up/blast/fast_swing rates, tracking counts + 10 has_\* indicators                                                                                                              | 20           |
 | **Age**          | age, age_squared, age_delta_speed/power/patience (computed but excluded by default)                                                                                                                                     | 5 (2 active) |
 | **Park Factors** | park_factor_runs, park_factor_hr                                                                                                                                                                                        | 2            |
 | **Team Stats**   | team_runs_per_game, team_ops, team_sb, sb_rule_era, sb_era_x_speed, speed_age_interaction, team_sb_per_game, sb_era_x_attempt_rate                                                                                      | 8            |

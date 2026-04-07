@@ -6,3 +6,4 @@
 *.png
 *.npz
 !.gitignore
+!projections/projections_mtl_2026.csv
