@@ -4,6 +4,8 @@
 
 Baseball Hydra predicts next-season batter stats — OBP, SLG, HR, R, RBI, and SB — by training a multi-task learning (MTL) neural network on a decade of historical performance, Statcast batted-ball data, sprint and bat speed metrics, ballpark factors, and team context. The codebase was developed using Claude Code.
 
+[Here's the link](https://lambertchu.com/blog/vibe-coding-baseball) to my blog post describing my process of building this model.
+
 ### Why multi-task learning?
 
 Traditional projection systems model each stat independently. MTL trains a single neural network with a shared backbone that feeds into stat-specific prediction heads, so the model learns cross-stat relationships automatically: exit velocity informs HR projections, sprint speed shapes SB predictions, and OBP context flows into R and RBI estimates. The result is a model where improving one prediction can improve them all.
