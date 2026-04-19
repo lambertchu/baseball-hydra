@@ -18,15 +18,20 @@ import pandas as pd
 import pytest
 
 from src.data.build_snapshots import (
-    _add_ros_targets,
-    _add_week_totals,
-    _add_ytd_cumulative,
+    _add_ros_rates,
+    _add_week_suffix,
     _add_ytd_rates,
+    _apply_count_ytd_trail_ros,
     _derive_singles,
     build_weekly_snapshots,
 )
 from src.data.fetch_game_logs import _normalize_bref_columns, iso_weeks_in_season
 from src.data.fetch_statcast import _aggregate_batter_statcast_weekly
+
+
+def _prep_ytd(df: pd.DataFrame) -> pd.DataFrame:
+    """Test helper: apply week-suffix rename + ytd/trail/ros in one step."""
+    return _apply_count_ytd_trail_ros(_add_week_suffix(df))
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +283,7 @@ class TestYtdCumulative:
             _make_weekly_batting_row(100, 2024, 17, pa=18, hr=2),
         ]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        out = _add_ytd_cumulative(df)
+        out = _prep_ytd(df)
 
         assert list(out["pa_ytd"]) == [20, 42, 60]
         assert list(out["hr_ytd"]) == [1, 1, 3]
@@ -292,8 +296,7 @@ class TestYtdCumulative:
             _make_weekly_batting_row(200, 2024, 16, pa=10),
         ]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        out = _add_ytd_cumulative(df).sort_values(["mlbam_id", "iso_week"])
+        out = _prep_ytd(df).sort_values(["mlbam_id", "iso_week"])
 
         p100 = out[out["mlbam_id"] == 100]
         p200 = out[out["mlbam_id"] == 200]
@@ -311,9 +314,7 @@ class TestYtdRates:
             bb=10, so=15, hbp=2, sf=3,
         )]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        out = _add_ytd_rates(df)
+        out = _add_ytd_rates(_prep_ytd(df))
 
         h = 20 + 5 + 1 + 4  # 30
         ab = 100 - 10 - 2 - 3 - 0 - 0  # 85
@@ -327,9 +328,7 @@ class TestYtdRates:
             bb=10, so=15, hbp=2, sf=3,
         )]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        out = _add_ytd_rates(df)
+        out = _add_ytd_rates(_prep_ytd(df))
 
         tb = 20 + 2 * 5 + 3 * 1 + 4 * 4  # 49
         ab = 100 - 10 - 2 - 3
@@ -341,9 +340,7 @@ class TestYtdRates:
             singles=20, doubles=5, bb=10, so=15, hbp=2, sf=3,
         )]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        out = _add_ytd_rates(df)
+        out = _add_ytd_rates(_prep_ytd(df))
 
         assert out["hr_per_pa_ytd"].iloc[0] == pytest.approx(0.05, rel=1e-6)
         assert out["r_per_pa_ytd"].iloc[0] == pytest.approx(0.20, rel=1e-6)
@@ -366,10 +363,7 @@ class TestRosTargets:
                                       singles=3, doubles=1, bb=2, so=3, hbp=0, sf=0),
         ]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        df = _add_ytd_rates(df)
-        out = _add_ros_targets(df)
+        out = _add_ros_rates(_add_ytd_rates(_prep_ytd(df)))
 
         # For every count stat at every row: ytd + ros == season total
         for stat in ("pa", "hr", "r", "rbi", "sb"):
@@ -383,9 +377,7 @@ class TestRosTargets:
             _make_weekly_batting_row(100, 2024, 16, pa=22),
         ]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        out = _add_ros_targets(_add_ytd_rates(df))
+        out = _add_ros_rates(_add_ytd_rates(_prep_ytd(df)))
         assert (out["ros_pa"] >= 0).all()
 
     def test_last_week_ros_is_zero(self):
@@ -394,9 +386,7 @@ class TestRosTargets:
             _make_weekly_batting_row(100, 2024, 16, pa=22, hr=2),
         ]
         df = _derive_singles(pd.DataFrame(rows))
-        df = _add_week_totals(df)
-        df = _add_ytd_cumulative(df)
-        out = _add_ros_targets(_add_ytd_rates(df))
+        out = _add_ros_rates(_add_ytd_rates(_prep_ytd(df)))
         last = out.sort_values("iso_week").iloc[-1]
         assert last["ros_pa"] == 0
         assert last["ros_hr"] == 0
