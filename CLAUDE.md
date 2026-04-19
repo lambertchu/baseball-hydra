@@ -262,6 +262,7 @@ The project has a full end-to-end pipeline in place: data ingestion, feature eng
 | **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`              | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots                                                                                                    |
 | **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                          |
 | **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
+| **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`) | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns for the in-season ROS pipeline (Phase 1 of the stateful projector). Raw Statcast now retains `game_date`. Data layer only — no model consumes these yet. |
 
 ### 7.2 Current Reporting Outputs
 
@@ -302,6 +303,10 @@ uv run python -m src.data.fetch_statcast --seasons 2016-2025 --force     # Re-ag
 uv run python -m src.data.merge
 uv run python -m src.data.fetch_projections --year 2026                  # Public projections (Steamer/ZiPS/Bat/BatX)
 uv run python -m src.data.fetch_projections --year 2026 --systems steamer zips  # Specific systems only
+
+# Weekly snapshot data layer (in-season ROS pipeline, Phase 1)
+uv run python -m src.data.fetch_game_logs --seasons 2016-2026            # BRef per-(batter, ISO-week) batting logs
+uv run python -m src.data.build_snapshots --seasons 2016-2026            # Merge weekly BRef + Statcast → weekly_snapshots_{year}.parquet
 
 # Training
 uv run python -m src.models.mtl.train --config configs/mtl.yaml              # MTL holdout
@@ -348,13 +353,15 @@ baseball-hydra/
 │   ├── data/
 │   │   ├── __init__.py
 │   │   ├── fetch_batting.py           # FanGraphs batting stats download
-│   │   ├── fetch_raw_statcast.py      # Raw Statcast BBE download (pitch-level)
-│   │   ├── fetch_statcast.py          # Statcast aggregation (local raw -> agg, API fallback)
+│   │   ├── fetch_raw_statcast.py      # Raw Statcast BBE download (pitch-level, retains game_date)
+│   │   ├── fetch_statcast.py          # Statcast aggregation (season + ISO-week, API fallback)
+│   │   ├── fetch_game_logs.py         # BRef per-(batter, ISO-week) batting logs
 │   │   ├── fetch_speed.py             # Sprint speed + bat speed download
 │   │   ├── fetch_context.py           # Park factors + team stats download
 │   │   ├── fetch_projections.py        # FanGraphs public projections (Steamer/ZiPS/Bat/BatX)
 │   │   ├── fetch_all.py               # Unified CLI: download all sources
 │   │   ├── merge.py                   # Merge all sources -> modeling dataset
+│   │   ├── build_snapshots.py         # Weekly BRef + Statcast → weekly_snapshots_{year}.parquet
 │   │   └── splits.py                  # Chronological split logic
 │   ├── features/
 │   │   ├── __init__.py
@@ -391,7 +398,8 @@ baseball-hydra/
     ├── test_mtl.py                   # MTL core tests
     ├── test_backtest.py               # Backtest fold and report behavior
     ├── test_projections.py            # Public projections fetch, load, merge
-    └── test_plots_and_predictions.py   # Plots and prediction helpers
+    ├── test_plots_and_predictions.py   # Plots and prediction helpers
+    └── test_weekly_snapshots.py        # Weekly snapshot pipeline (ISO weeks, ytd/ros invariants)
 ```
 
 ---
