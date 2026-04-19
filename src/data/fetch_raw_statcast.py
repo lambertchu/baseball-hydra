@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _KEEP_COLUMNS = [
     "batter",
+    "game_date",  # Required for weekly / ROS aggregation
     "launch_speed",
     "launch_angle",
     "bb_type",
