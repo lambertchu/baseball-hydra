@@ -32,8 +32,8 @@ from src.eval.pa_projection import project_pa
 from src.eval.plots import save_figure
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import COUNT_STATS, RATE_STATS, TARGET_COLUMNS, TARGET_DISPLAY, TARGET_STATS
-from src.models.mtl.model import MTLEnsembleForecaster, MTLForecaster
-from src.models.utils import align_features, get_model_configs
+from src.models.mtl.model import MTLEnsembleForecaster
+from src.models.utils import align_features, get_model_configs, train_model_for_year
 
 matplotlib.use("Agg")
 
@@ -161,47 +161,6 @@ def _load_external_projections(
     return result
 
 
-def train_model_for_year(
-    model_key: str,
-    retrain_df: pd.DataFrame,
-    data_config: dict,
-    seed: int = 42,
-    device: str = "cpu",
-) -> object:
-    """Train a fresh model on the retrain set for one evaluation fold.
-
-    The most recent year in retrain_df is carved out as eval_set for early stopping.
-    """
-    if retrain_df["season"].nunique() > 1:
-        max_season = retrain_df["season"].max()
-        train_part = retrain_df[retrain_df["season"] != max_season]
-        eval_part = retrain_df[retrain_df["season"] == max_season]
-        X_train, y_train = extract_xy(train_part, data_config)
-        X_eval, y_eval = extract_xy(eval_part, data_config)
-        eval_set: tuple | None = (X_eval, y_eval)
-    else:
-        train_part = retrain_df
-        X_train, y_train = extract_xy(retrain_df, data_config)
-        eval_set = None
-
-    season = train_part["season"].values if "season" in train_part.columns else None
-
-    info = MODEL_CONFIGS[model_key]
-    with open(info["config_path"]) as f:
-        config = yaml.safe_load(f)
-    config["seed"] = seed
-
-    ensemble_cfg = config.get("ensemble", {})
-    ensemble_n_seeds = ensemble_cfg.get("n_seeds", 0)
-    if ensemble_n_seeds > 1:
-        model = MTLEnsembleForecaster(config)
-    else:
-        model = MTLForecaster(config)
-    model.fit(X_train, y_train, eval_set=eval_set, season=season)
-
-    return model
-
-
 def _load_saved_model(model_key: str) -> object:
     """Load a pre-trained model from disk."""
     info = MODEL_CONFIGS[model_key]
@@ -288,7 +247,7 @@ def evaluate_year(
         else:
             logger.info("  Training MTL for %d …", eval_year)
             model = train_model_for_year(
-                "mtl", retrain_df, data_config, seed, device,
+                "mtl", retrain_df, data_config, seed=seed,
             )
         X_aligned = align_features(X_predict, model, mtl_display)
         mtl_preds = model.predict(X_aligned)

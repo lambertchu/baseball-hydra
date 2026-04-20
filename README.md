@@ -57,6 +57,10 @@ uv run python scripts/benchmark_vs_public.py --with-plots   # + comparison plots
 # Step 7 (optional): Build weekly snapshots for the in-season ROS pipeline
 uv run python -m src.data.fetch_game_logs --seasons 2016-2026   # BRef weekly batting logs
 uv run python -m src.data.build_snapshots --seasons 2016-2026   # Weekly snapshots with ytd + ros targets
+
+# Step 8 (optional): ROS benchmark at PA checkpoints (50 / 100 / 200 / 400)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025             # persist_observed baseline (no retraining)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain   # + frozen_preseason and marcel_blend (retrains MTL per year)
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -117,10 +121,14 @@ data/
 ├── reports/
 │   ├── mtl_report.json
 │   ├── mtl_backtest_report.json
-│   └── benchmark/                 # Multi-year benchmark vs public projections
-│       ├── benchmark_report.json
-│       ├── benchmark_table.csv
-│       └── benchmark_rmse.png
+│   ├── benchmark/                 # Multi-year benchmark vs public projections
+│   │   ├── benchmark_report.json
+│   │   ├── benchmark_table.csv
+│   │   └── benchmark_rmse.png
+│   └── benchmark_ros/             # Rolling ROS benchmark at PA checkpoints
+│       ├── benchmark_ros_report.json
+│       ├── benchmark_ros_table.csv
+│       └── preseason/             # Per-year MTL preseason prediction cache
 └── projections/                   # Our model projections
     ├── projections_mtl_2026.csv
     └── projections_vs_external_2026.csv  # Our model vs public projections
@@ -136,6 +144,7 @@ Implemented in `src/eval/`:
 - Calibration scatter plots (predicted vs actual)
 - Residual distribution histograms
 - MTL training curves (loss + validation RMSE)
+- **ROS metrics** (`src/eval/ros_metrics.py`): pinball quantile loss, PIT coverage for calibration, per-player PA-checkpoint row selection — used by the ROS benchmark script
 
 ## Project Structure
 
