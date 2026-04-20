@@ -113,9 +113,11 @@ def _normalize_bref_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename = {k: v for k, v in _RENAME.items() if k in df.columns}
     out = df.rename(columns=rename).copy()
 
-    # Drop minor-league rows when present (Lev == 'Maj' for MLB).
+    # Drop minor-league rows when present. BRef and pybaseball have used both
+    # "Maj-AL/Maj-NL" and "MLB-AL/MLB-NL" as the MLB level label over time.
     if "level" in out.columns:
-        out = out[out["level"].astype(str).str.startswith("Maj")].copy()
+        lv = out["level"].astype(str)
+        out = out[lv.str.startswith(("Maj", "MLB"))].copy()
 
     for col in _NUMERIC_COLS:
         if col in out.columns:
@@ -183,6 +185,7 @@ def fetch_batter_weekly_stats(
     logger.info("Fetching %d ISO weeks for %d", len(weeks), year)
 
     frames: list[pd.DataFrame] = []
+    failed: list[tuple[int, int]] = []
     for i, (iso_year, iso_week, wstart, wend) in enumerate(weeks, start=1):
         logger.info(
             "  [%d/%d] %d-W%02d  %s..%s",
@@ -195,6 +198,7 @@ def fetch_batter_weekly_stats(
             )
         except Exception:
             logger.exception("  Failed week %d-W%02d", iso_year, iso_week)
+            failed.append((iso_year, iso_week))
             if delay > 0:
                 time.sleep(delay)
             continue
@@ -218,6 +222,13 @@ def fetch_batter_weekly_stats(
         if delay > 0:
             time.sleep(delay)
 
+    # Any per-week failure would produce an incomplete parquet whose YTD/ROS
+    # targets would be silently wrong downstream — fail hard instead.
+    if failed:
+        raise RuntimeError(
+            f"Failed to fetch {len(failed)} week(s) for {year}: {failed}. "
+            f"Re-run to retry; existing output (if any) is not written."
+        )
     if not frames:
         raise RuntimeError(f"No weekly data fetched for {year}")
 

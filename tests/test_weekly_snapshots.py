@@ -17,15 +17,22 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from unittest.mock import patch
+
 from src.data.build_snapshots import (
     _add_ros_rates,
     _add_week_suffix,
     _add_ytd_rates,
     _apply_count_ytd_trail_ros,
     _derive_singles,
+    _merge_weekly_sources,
     build_weekly_snapshots,
 )
-from src.data.fetch_game_logs import _normalize_bref_columns, iso_weeks_in_season
+from src.data.fetch_game_logs import (
+    _normalize_bref_columns,
+    fetch_batter_weekly_stats,
+    iso_weeks_in_season,
+)
 from src.data.fetch_statcast import _aggregate_batter_statcast_weekly
 
 
@@ -253,6 +260,17 @@ class TestNormalizeBref:
         out = _normalize_bref_columns(raw)
         assert len(out) == 1
         assert out["name"].iloc[0] == "A"
+
+    def test_accepts_mlb_and_maj_level_prefixes(self):
+        """BRef has used both 'Maj-AL/Maj-NL' and 'MLB-AL/MLB-NL' over time."""
+        raw = pd.DataFrame({
+            "Name": ["A", "B", "C", "D", "E"],
+            "Lev": ["Maj-AL", "MLB-NL", "MLB", "AAA", "AA"],
+            "PA": ["10", "15", "12", "8", "5"],
+            "mlbID": ["1", "2", "3", "4", "5"],
+        })
+        out = _normalize_bref_columns(raw)
+        assert sorted(out["name"].tolist()) == ["A", "B", "C"]
 
 
 # ---------------------------------------------------------------------------
@@ -483,3 +501,111 @@ class TestBuildWeeklySnapshotsPipeline:
 
         assert list(result["hr_ytd"]) == [1, 3, 6]
         assert list(result["pa_ytd"]) == [10, 25, 45]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for PR #3 review feedback
+# ---------------------------------------------------------------------------
+
+
+class TestMergeDedup:
+    """When both sides share non-key columns, the merge must not emit _x/_y suffixes."""
+
+    def test_week_start_date_not_duplicated(self):
+        batting = pd.DataFrame({
+            "mlbam_id": [100], "iso_year": [2024], "iso_week": [15],
+            "week_start_date": [pd.Timestamp("2024-04-08")],
+            "week_end_date": [pd.Timestamp("2024-04-14")],
+            "season": [2024], "pa": [20],
+        })
+        statcast = pd.DataFrame({
+            "mlbam_id": [100], "iso_year": [2024], "iso_week": [15],
+            # Statcast's week_start_date is the first-game date, not Monday
+            "week_start_date": [pd.Timestamp("2024-04-09")],
+            "season": [2024], "bbe_count": [10], "avg_exit_velocity": [90.0],
+        })
+        merged = _merge_weekly_sources(batting, statcast)
+        assert "week_start_date_x" not in merged.columns
+        assert "week_start_date_y" not in merged.columns
+        # BRef (Monday) value is canonical
+        assert merged["week_start_date"].iloc[0] == pd.Timestamp("2024-04-08")
+
+
+class TestBbeValidMaskDenominator:
+    """BBE-weighted YTD must not deflate when a week has BBEs but a NaN rate."""
+
+    def test_ytd_ignores_nan_rate_weeks(self, tmp_path):
+        batting_rows = [
+            _make_weekly_batting_row(100, 2024, 15, pa=25, season=2024,
+                                      singles=5, doubles=1, bb=2, so=5, hbp=0, sf=0),
+            _make_weekly_batting_row(100, 2024, 16, pa=22, season=2024,
+                                      singles=4, doubles=2, bb=3, so=4, hbp=0, sf=0),
+            _make_weekly_batting_row(100, 2024, 17, pa=28, season=2024,
+                                      singles=6, doubles=0, bb=4, so=6, hbp=0, sf=0),
+        ]
+        batting = _derive_singles(pd.DataFrame(batting_rows))
+        batting.to_parquet(tmp_path / "batting_week_2024.parquet", index=False)
+
+        statcast = pd.DataFrame({
+            "mlbam_id": [100, 100, 100],
+            "iso_year": [2024, 2024, 2024],
+            "iso_week": [15, 16, 17],
+            "season": [2024, 2024, 2024],
+            "bbe_count": [10, 8, 12],
+            # xwOBA valid in weeks 15 and 17, missing (NaN) in week 16 despite BBE > 0
+            "estimated_woba_using_speedangle": [0.400, np.nan, 0.350],
+            "avg_exit_velocity": [92.0, 91.0, 93.0],
+        })
+        statcast.to_parquet(tmp_path / "statcast_agg_week_2024.parquet", index=False)
+
+        result = build_weekly_snapshots(
+            2024, raw_dir=tmp_path, min_ytd_pa=0,
+        ).sort_values("iso_week").reset_index(drop=True)
+
+        # Week 15: first valid xwOBA  → ytd = 0.400
+        # Week 16: xwOBA NaN; ytd must not be deflated by the week-16 BBEs.
+        #          Valid denom = 10 (only week 15), numerator = 10*0.400
+        #          → ytd remains 0.400
+        # Week 17: valid denom = 10+12=22, numerator = 10*0.400 + 12*0.350 = 8.2
+        #          → ytd = 8.2 / 22 ≈ 0.3727
+        xwoba_ytd = result["estimated_woba_using_speedangle_ytd"].tolist()
+        assert xwoba_ytd[0] == pytest.approx(0.400, rel=1e-6)
+        assert xwoba_ytd[1] == pytest.approx(0.400, rel=1e-6)
+        assert xwoba_ytd[2] == pytest.approx(8.2 / 22, rel=1e-6)
+
+        # Sanity: avg_exit_velocity (never NaN) uses the full BBE denominator.
+        ev_ytd = result["avg_exit_velocity_ytd"].tolist()
+        assert ev_ytd[0] == pytest.approx(92.0)
+        assert ev_ytd[1] == pytest.approx((10 * 92.0 + 8 * 91.0) / 18, rel=1e-6)
+        assert ev_ytd[2] == pytest.approx(
+            (10 * 92.0 + 8 * 91.0 + 12 * 93.0) / 30, rel=1e-6,
+        )
+
+
+class TestFetchGameLogsFailsHard:
+    """A per-week fetch error must abort the season, not silently drop a week."""
+
+    def test_one_week_error_raises(self, tmp_path):
+        call_count = {"n": 0}
+
+        def flaky_batting_stats_range(start_dt, end_dt):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("Simulated transient BRef failure")
+            return pd.DataFrame({
+                "Name": ["A"], "Lev": ["Maj-AL"],
+                "PA": ["10"], "mlbID": ["1"],
+            })
+
+        fake_pb = type("FakePB", (), {"batting_stats_range": staticmethod(flaky_batting_stats_range)})()
+
+        # Only enumerate a few weeks by using a short season window
+        short_dates = {2024: ("2024-04-08", "2024-04-28")}
+        with patch("src.data.fetch_game_logs._SEASON_DATES", short_dates), \
+             patch.dict("sys.modules", {"pybaseball": fake_pb}):
+            with pytest.raises(RuntimeError, match="Failed to fetch"):
+                fetch_batter_weekly_stats(
+                    2024, out_dir=tmp_path, delay=0.0,
+                )
+
+        assert not (tmp_path / "batting_week_2024.parquet").exists()

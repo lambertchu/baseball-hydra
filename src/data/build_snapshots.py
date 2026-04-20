@@ -88,7 +88,10 @@ def _merge_weekly_sources(
 
     statcast_wk = statcast_wk.copy()
     statcast_wk["mlbam_id"] = statcast_wk["mlbam_id"].astype("int64")
-    statcast_wk = statcast_wk.drop(columns=[c for c in ("season",) if c in statcast_wk.columns])
+    # Drop columns the batting side already provides (BRef values are canonical).
+    # Statcast's `week_start_date` is the first-game date in the week, not Monday.
+    redundant = ("season", "week_start_date", "week_end_date")
+    statcast_wk = statcast_wk.drop(columns=[c for c in redundant if c in statcast_wk.columns])
 
     return batting_wk.merge(
         statcast_wk,
@@ -113,21 +116,27 @@ def _apply_count_ytd_trail_ros(df: pd.DataFrame, window: int = 4) -> pd.DataFram
     """Add ytd cumulative, trailing-window, and ROS count columns in one pass.
 
     Shares a single sort and groupby across all three transforms to avoid
-    O(n log n) resorts and repeated grouper construction.
+    O(n log n) resorts and repeated grouper construction. Count-stat
+    cumsum/rolling/transform are batched across all columns.
     """
     df = df.sort_values(_SORT_KEYS).reset_index(drop=True)
     grouped = df.groupby(_GROUP_KEYS, sort=False)
 
-    for stat in _WEEK_COUNTS:
-        wk = f"{stat}_week"
-        if wk not in df.columns:
-            continue
-        df[f"{stat}_ytd"] = grouped[wk].cumsum()
-        df[f"trail{window}w_{stat}"] = (
-            grouped[wk].rolling(window, min_periods=1).sum()
+    count_cols = [f"{s}_week" for s in _WEEK_COUNTS if f"{s}_week" in df.columns]
+    if count_cols:
+        cumsums = grouped[count_cols].cumsum()
+        totals = grouped[count_cols].transform("sum")
+        rolls = (
+            grouped[count_cols].rolling(window, min_periods=1).sum()
             .reset_index(level=_GROUP_KEYS, drop=True)
         )
-        df[f"ros_{stat}"] = grouped[wk].transform("sum") - df[f"{stat}_ytd"]
+        for stat in _WEEK_COUNTS:
+            wk = f"{stat}_week"
+            if wk not in count_cols:
+                continue
+            df[f"{stat}_ytd"] = cumsums[wk]
+            df[f"trail{window}w_{stat}"] = rolls[wk]
+            df[f"ros_{stat}"] = totals[wk] - cumsums[wk]
 
     if "bbe_count_week" in df.columns:
         df["bbe_count_ytd"] = grouped["bbe_count_week"].cumsum()
@@ -136,21 +145,25 @@ def _apply_count_ytd_trail_ros(df: pd.DataFrame, window: int = 4) -> pd.DataFram
             .reset_index(level=_GROUP_KEYS, drop=True)
         )
 
-        # BBE-weighted ytd rates: Σ(bbe_w · r_w) / Σ(bbe_w).
+        # BBE-weighted ytd rate: Σ(bbe_w · r_w) / Σ(bbe_w where r_w is non-null).
+        # Using a per-column denominator avoids deflating the average when a
+        # week has valid BBEs but a NaN rate (common for xStats in old seasons).
         bbe_wk = df["bbe_count_week"].fillna(0)
+        tmp_cols: list[str] = []
         for col in _STATCAST_RATE_COLS:
             wk = f"{col}_week"
             if wk not in df.columns:
                 continue
             df[f"__w_{col}"] = bbe_wk * df[wk].fillna(0)
-        weighted_cols = [f"__w_{c}" for c in _STATCAST_RATE_COLS if f"{c}_week" in df.columns]
-        if weighted_cols:
-            weighted_ytd = grouped[weighted_cols].cumsum()
+            df[f"__v_{col}"] = bbe_wk.where(df[wk].notna(), 0)
+            tmp_cols.extend([f"__w_{col}", f"__v_{col}"])
+        if tmp_cols:
+            cum = grouped[tmp_cols].cumsum()
             for col in _STATCAST_RATE_COLS:
-                wcol = f"__w_{col}"
-                if wcol in weighted_ytd.columns:
-                    df[f"{col}_ytd"] = _safe_div(weighted_ytd[wcol], df["bbe_count_ytd"])
-            df = df.drop(columns=weighted_cols)
+                wcol, vcol = f"__w_{col}", f"__v_{col}"
+                if wcol in cum.columns:
+                    df[f"{col}_ytd"] = _safe_div(cum[wcol], cum[vcol])
+            df = df.drop(columns=tmp_cols)
 
     return df
 
