@@ -121,6 +121,15 @@ class TestFrozenPreseason:
         # Row for mlbam_id=101 should be populated
         assert not preds.iloc[1].isna().any()
 
+    def test_zero_overlap_returns_none(self):
+        # Preseason cache for different players than the checkpoint rows —
+        # e.g. stale cache or dtype mismatch — should yield None, not an
+        # all-NaN frame that would wipe every baseline in evaluate_checkpoint.
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preseason["mlbam_id"] = preseason["mlbam_id"] + 10000
+        assert br.predict_frozen_preseason(rows, preseason) is None
+
 
 class TestMarcelBlend:
     def test_blend_formula(self):
@@ -230,6 +239,22 @@ class TestEvaluateCheckpoint:
         # Only persist_observed should run
         assert set(result["systems"]) == {"persist_observed"}
 
+    def test_zero_overlap_preseason_preserves_persist_observed(self):
+        # Stale preseason cache whose IDs don't match any checkpoint row must
+        # NOT wipe persist_observed results (the original bug Codex caught).
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preseason["mlbam_id"] = preseason["mlbam_id"] + 10000
+        result = br.evaluate_checkpoint(
+            rows,
+            baselines=list(br.ALL_BASELINES),
+            preseason=preseason,
+            prior_pa=200.0,
+            min_ros_pa=50,
+        )
+        assert result["n_players"] == 3
+        assert set(result["systems"]) == {"persist_observed"}
+
 
 # ---------------------------------------------------------------------------
 # pool_by_threshold
@@ -321,6 +346,20 @@ class TestPreseasonCache:
         assert result is None
 
     def test_retrain_without_inputs_raises(self, tmp_path):
+        with pytest.raises(RuntimeError, match="df_featured"):
+            br.load_or_generate_preseason_cache(
+                year=2024,
+                cache_dir=tmp_path,
+                df_featured=None,
+                data_config=None,
+                retrain=True,
+            )
+
+    def test_retrain_bypasses_existing_cache(self, tmp_path):
+        # Existing cache + retrain=True must NOT short-circuit; otherwise the
+        # cache stays stale after feature/model changes. Retraining without
+        # df_featured should reach the same error path as a missing cache.
+        _make_preseason_cache().to_parquet(tmp_path / "mtl_preseason_2024.parquet")
         with pytest.raises(RuntimeError, match="df_featured"):
             br.load_or_generate_preseason_cache(
                 year=2024,

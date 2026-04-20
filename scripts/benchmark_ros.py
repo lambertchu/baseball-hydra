@@ -141,12 +141,15 @@ def load_or_generate_preseason_cache(
 
     Uses a per-year parquet cache. Returns ``None`` if the cache is missing
     and ``retrain`` is False (callers should then skip preseason-dependent
-    baselines).
+    baselines). With ``retrain=True`` the cache is regenerated even when a
+    stale file already exists, so feature/model/config changes are reflected.
     """
     cache_path = cache_dir / f"mtl_preseason_{year}.parquet"
-    if cache_path.exists():
+    if cache_path.exists() and not retrain:
         logger.info("  Loaded preseason cache %s", cache_path)
         return pd.read_parquet(cache_path)
+    if cache_path.exists() and retrain:
+        logger.info("  Overwriting preseason cache at %s (--retrain)", cache_path)
 
     if not retrain:
         logger.warning(
@@ -208,6 +211,16 @@ def _preseason_rate_matrix(
     pre_indexed = preseason.drop_duplicates(subset=[id_col]).set_index(id_col)[pre_target_cols]
     aligned = pre_indexed.reindex(rows[id_col].values).reset_index(drop=True)
     aligned.columns = list(ROS_RATE_TARGETS)
+    # Zero-overlap cache: an all-NaN matrix would drive the downstream
+    # non-NaN intersection filter to empty, wiping even baselines that don't
+    # need preseason (e.g. persist_observed). Treat as if preseason were absent.
+    if aligned.isna().all(axis=None):
+        logger.warning(
+            "Preseason cache has zero %s overlap with checkpoint rows (%d rows); "
+            "skipping preseason-dependent baselines.",
+            id_col, len(rows),
+        )
+        return None
     return aligned
 
 
