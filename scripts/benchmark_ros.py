@@ -118,10 +118,13 @@ def _retrain_preseason_for_year(
     preds = model.predict(X_aligned)
 
     # mlbam_id is the weekly-snapshot join key; idfg kept for debugging only.
+    # Align on index rather than positionally: ``MTLForecaster.predict``
+    # preserves the input DataFrame's index, so this is row-correct even if a
+    # future ``extract_xy`` variant drops rows during feature extraction.
     out = preds.copy()
     for id_col in ("mlbam_id", "idfg"):
         if id_col in predict_df.columns:
-            out[id_col] = predict_df[id_col].values
+            out[id_col] = predict_df.loc[out.index, id_col].values
     out["season"] = eval_year
     return out
 
