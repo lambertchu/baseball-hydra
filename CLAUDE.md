@@ -249,7 +249,7 @@ Every evaluation run must be compared against the **naive persistence** baseline
 
 ## 7) Current Implementation Status
 
-The project has a full end-to-end pipeline in place: data ingestion, feature engineering, MTL model, evaluation, 2026 predictions, and public projection benchmarking.
+Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. An in-season data layer (weekly snapshots) and ROS evaluation harness are in place as the foundation for the rest-of-season projector — no in-season model consumes them yet.
 
 ### 7.1 What Was Built
 
@@ -262,14 +262,15 @@ The project has a full end-to-end pipeline in place: data ingestion, feature eng
 | **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`              | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots                                                                                                    |
 | **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                          |
 | **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
-| **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`) | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns for the in-season ROS pipeline (Phase 1 of the stateful projector). Raw Statcast now retains `game_date`. Data layer only — no model consumes these yet. |
+| **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`) | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns. Raw Statcast retains `game_date`. Data layer only — not yet consumed by any model. |
+| **ROS Evaluation Harness** | `src/eval/ros_metrics.py`, `scripts/benchmark_ros.py` | Pinball loss, PIT coverage, PA-checkpoint row selection, plus a rolling ROS benchmark at 50/100/200/400 PA checkpoints with three baselines: `persist_observed`, `frozen_preseason`, `marcel_blend`. |
 
 ### 7.2 Current Reporting Outputs
 
 - Holdout evaluation report: `data/reports/mtl_report.json`
 - Backtest evaluation report: `data/reports/mtl_backtest_report.json`
 
-### 7.3 Benchmark Results (March 2026)
+### 7.3 Benchmark Results
 
 Pooled RMSE across 2022-2025 (4 years, 1,063 player-seasons, rolling retrain):
 
@@ -307,6 +308,10 @@ uv run python -m src.data.fetch_projections --year 2026 --systems steamer zips  
 # Weekly snapshot data layer (in-season ROS pipeline, Phase 1)
 uv run python -m src.data.fetch_game_logs --seasons 2016-2026            # BRef per-(batter, ISO-week) batting logs
 uv run python -m src.data.build_snapshots --seasons 2016-2026            # Merge weekly BRef + Statcast → weekly_snapshots_{year}.parquet
+
+# ROS benchmark (PA checkpoints 50/100/200/400)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025                   # persist_observed only (no retraining)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain         # + frozen_preseason + marcel_blend (retrains MTL per year)
 
 # Training
 uv run python -m src.models.mtl.train --config configs/mtl.yaml              # MTL holdout
@@ -346,7 +351,8 @@ baseball-hydra/
 │   ├── external_projections/          # Public projections (Steamer, ZiPS, etc.) as CSV
 │   ├── models/                        # Trained model artifacts
 │   ├── reports/                       # Evaluation report JSON files
-│   │   └── benchmark/                 # Multi-year benchmark vs public projections
+│   │   ├── benchmark/                 # Multi-year benchmark vs public projections
+│   │   └── benchmark_ros/             # ROS benchmark outputs + preseason/ MTL cache
 │   └── projections/                   # Our model projection CSV files
 ├── src/
 │   ├── __init__.py
@@ -374,7 +380,7 @@ baseball-hydra/
 │   │   └── registry.py                # Feature name registry (some excluded via config)
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── utils.py                   # Shared: align_features, model configs
+│   │   ├── utils.py                   # Shared: align_features, model configs, train_model_for_year
 │   │   └── mtl/
 │   │       ├── __init__.py
 │   │       ├── model.py               # MTLForecaster
@@ -384,11 +390,13 @@ baseball-hydra/
 │   └── eval/
 │       ├── __init__.py
 │       ├── metrics.py                 # RMSE, MAE, R², MAPE
+│       ├── ros_metrics.py             # ROS pinball/PIT metrics, PA-checkpoint selection
 │       ├── report.py                  # Generate evaluation reports (JSON + console)
 │       └── plots.py                   # Calibration, residual, comparison plots
 ├── scripts/
 │   ├── generate_projections.py         # Generate 2026 season projections
 │   ├── benchmark_vs_public.py         # Multi-year rolling benchmark vs public projections
+│   ├── benchmark_ros.py               # Rolling ROS benchmark at PA checkpoints
 │   └── run_ablation.py                # Ablation study for MTL config variants
 └── tests/
     ├── __init__.py
@@ -399,7 +407,9 @@ baseball-hydra/
     ├── test_backtest.py               # Backtest fold and report behavior
     ├── test_projections.py            # Public projections fetch, load, merge
     ├── test_plots_and_predictions.py   # Plots and prediction helpers
-    └── test_weekly_snapshots.py        # Weekly snapshot pipeline (ISO weeks, ytd/ros invariants)
+    ├── test_weekly_snapshots.py        # Weekly snapshot pipeline (ISO weeks, ytd/ros invariants)
+    ├── test_ros_metrics.py             # ROS metrics (pinball, PIT, PA checkpoints)
+    └── test_benchmark_ros.py           # ROS benchmark baselines + evaluation flow
 ```
 
 ---

@@ -5,6 +5,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,50 @@ def get_model_configs() -> dict[str, dict]:
             "display_name": "MTL",
         },
     }
+
+
+def train_model_for_year(
+    model_key: str,
+    retrain_df: pd.DataFrame,
+    data_config: dict,
+    seed: int = 42,
+) -> object:
+    """Train a fresh model on ``retrain_df`` for one evaluation fold.
+
+    When ``retrain_df`` spans multiple seasons, the most recent one is carved
+    out as the early-stopping evaluation set; otherwise training runs without
+    an eval set. Returns the fit model instance.
+    """
+    from src.features.pipeline import extract_xy
+    from src.models.mtl.model import MTLEnsembleForecaster, MTLForecaster
+
+    if retrain_df["season"].nunique() > 1:
+        max_season = retrain_df["season"].max()
+        train_part = retrain_df[retrain_df["season"] != max_season]
+        eval_part = retrain_df[retrain_df["season"] == max_season]
+        X_train, y_train = extract_xy(train_part, data_config)
+        X_eval, y_eval = extract_xy(eval_part, data_config)
+        eval_set: tuple | None = (X_eval, y_eval)
+    else:
+        train_part = retrain_df
+        X_train, y_train = extract_xy(retrain_df, data_config)
+        eval_set = None
+
+    season = train_part["season"].values if "season" in train_part.columns else None
+
+    info = get_model_configs()[model_key]
+    with open(info["config_path"]) as f:
+        config = yaml.safe_load(f)
+    config["seed"] = seed
+
+    ensemble_cfg = config.get("ensemble", {})
+    if ensemble_cfg.get("n_seeds", 0) > 1:
+        model = MTLEnsembleForecaster(config)
+    else:
+        model = MTLForecaster(config)
+    model.fit(X_train, y_train, eval_set=eval_set, season=season)
+
+    return model
 
 
 def align_features(X: pd.DataFrame, model: object, model_name: str = "") -> pd.DataFrame:
