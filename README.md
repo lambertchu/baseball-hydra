@@ -53,6 +53,10 @@ uv run python scripts/generate_projections.py --with-public   # side-by-side wit
 uv run python scripts/benchmark_vs_public.py   # full 2022-2025 benchmark
 uv run python scripts/benchmark_vs_public.py --years 2025   # quick smoke test
 uv run python scripts/benchmark_vs_public.py --with-plots   # + comparison plots
+
+# Step 7 (optional): Build weekly snapshots for the in-season ROS pipeline
+uv run python -m src.data.fetch_game_logs --seasons 2016-2026   # BRef weekly batting logs
+uv run python -m src.data.build_snapshots --seasons 2016-2026   # Weekly snapshots with ytd + ros targets
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -73,10 +77,10 @@ the naive persistence baseline (Y+1 = Y).
 | Group            | Features                                                                                                                                                                                                                | Count        |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | **Batting**      | pa, bb_rate, k_rate, iso, babip, avg, obp, slg, hr, sb, cs, sb_rate, woba, wrc_plus, hbp_rate, contact_rate, per-PA rates (hr, r, rbi, sb, sb_attempt), ibb_rate, ubb_rate, singles/doubles/triples/extra_base/cs rates | 28           |
-| **Statcast**     | avg_exit_velocity, ev_p95, max_exit_velocity, avg_launch_angle, barrel_rate, hard_hit_rate, sweet_spot_rate, xwOBA/xBA/xSLG, bbe_count + 11 has_\* indicators                                                          | 22           |
+| **Statcast**     | avg*exit_velocity, ev_p95, max_exit_velocity, avg_launch_angle, barrel_rate, hard_hit_rate, sweet_spot_rate, xwOBA/xBA/xSLG, bbe_count + 11 has*\* indicators                                                           | 22           |
 | **Non-Contact**  | regressed k_rate/bb_rate/hbp_rate/babip/iso/hr_per_bbe                                                                                                                                                                  | 6            |
 | **Sprint Speed** | sprint_speed, has_sprint_speed                                                                                                                                                                                          | 2            |
-| **Bat Speed**    | avg_bat_speed, avg_swing_speed, squared_up/blast/fast_swing rates, tracking counts + 10 has_\* indicators                                                                                                              | 20           |
+| **Bat Speed**    | avg*bat_speed, avg_swing_speed, squared_up/blast/fast_swing rates, tracking counts + 10 has*\* indicators                                                                                                               | 20           |
 | **Age**          | age, age_squared, age_delta_speed/power/patience (computed but excluded by default)                                                                                                                                     | 5 (2 active) |
 | **Park Factors** | park_factor_runs, park_factor_hr                                                                                                                                                                                        | 2            |
 | **Team Stats**   | team_runs_per_game, team_ops, team_sb, sb_rule_era, sb_era_x_speed, speed_age_interaction, team_sb_per_game, sb_era_x_attempt_rate                                                                                      | 8            |
@@ -92,10 +96,13 @@ All generated data lives under `data/` and is gitignored:
 data/
 ├── raw/                           # Per-year cached parquets (from fetch_all)
 │   ├── batting_{year}.parquet
-│   ├── statcast_raw_{year}.parquet   # Raw BBE (pitch-level)
-│   ├── statcast_agg_{year}.parquet   # Aggregated per-batter metrics
+│   ├── statcast_raw_{year}.parquet      # Raw BBE (pitch-level, retains game_date)
+│   ├── statcast_agg_{year}.parquet      # Aggregated per-batter metrics
+│   ├── statcast_agg_week_{year}.parquet # Per-(batter, ISO-week) BBE metrics
+│   ├── batting_week_{year}.parquet      # BRef per-(batter, ISO-week) batting logs
+│   ├── weekly_snapshots_{year}.parquet  # Weekly snapshots with ytd + ros targets
 │   ├── sprint_speed_{year}.parquet
-│   ├── bat_speed_{year}.parquet      # 2024+ only
+│   ├── bat_speed_{year}.parquet         # 2024+ only
 │   ├── park_factors_{year}.parquet
 │   └── team_batting_{year}.parquet
 ├── external_projections/          # Public projections (comparison only)
@@ -137,5 +144,5 @@ See [CLAUDE.md](CLAUDE.md) for the full engineering plan, data contract, and fea
 ## Running Tests
 
 ```bash
-uv run pytest tests/ -v   # 251 tests
+uv run pytest tests/ -v
 ```

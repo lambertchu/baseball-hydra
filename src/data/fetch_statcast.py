@@ -40,33 +40,44 @@ _SEASON_DATES: dict[int, tuple[str, str]] = {
 }
 
 
-def _aggregate_batter_statcast(df: pd.DataFrame, min_bbe: int = 50) -> pd.DataFrame:
-    """Aggregate raw Statcast pitch data into per-batter quality metrics.
-
-    Parameters
-    ----------
-    df:
-        Raw Statcast pitch-level DataFrame (from pybaseball.statcast).
-    min_bbe:
-        Minimum batted-ball events for inclusion.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per batter with aggregated Statcast quality metrics.
-    """
-    # Filter to batted-ball events only (has launch_speed and launch_angle)
-    bbe = df[
+def _filter_bbe(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter raw Statcast pitch data to regular-season batted-ball events."""
+    return df[
         df["launch_speed"].notna()
         & df["launch_angle"].notna()
         & df["bb_type"].notna()
         & (df["game_type"] == "R")
     ].copy()
 
+
+def _compute_bbe_metrics(
+    bbe: pd.DataFrame,
+    group_keys: list[str],
+    min_bbe: int,
+    extra_aggs: dict[str, tuple[str, str]] | None = None,
+) -> pd.DataFrame:
+    """Compute per-group Statcast quality metrics on filtered BBE rows.
+
+    Shared by season-level and weekly aggregators — the only differences are
+    the group_keys and optional extras (e.g. weekly adds `week_start_date`).
+
+    Parameters
+    ----------
+    bbe:
+        Already-filtered BBE DataFrame (``_filter_bbe`` output).
+    group_keys:
+        Columns to group by. ``["batter"]`` for season, or
+        ``["batter", "iso_year", "iso_week"]`` for weekly.
+    min_bbe:
+        Minimum BBE per group for inclusion.
+    extra_aggs:
+        Optional extra columns mapped to ``(src_col, agg_method_name)``, e.g.
+        ``{"week_start_date": ("game_date", "min")}``.
+    """
     if bbe.empty:
         return pd.DataFrame()
 
-    grouped = bbe.groupby("batter")
+    grouped = bbe.groupby(group_keys)
 
     agg = pd.DataFrame({
         "bbe_count": grouped.size(),
@@ -76,53 +87,79 @@ def _aggregate_batter_statcast(df: pd.DataFrame, min_bbe: int = 50) -> pd.DataFr
         "avg_launch_angle": grouped["launch_angle"].mean(),
     })
 
-    # Expected-contact quality metrics (when present in Statcast payload)
-    expected_cols = [
+    if extra_aggs:
+        for dst, (src, method) in extra_aggs.items():
+            agg[dst] = getattr(grouped[src], method)()
+
+    for col in (
         "estimated_woba_using_speedangle",
         "estimated_ba_using_speedangle",
         "estimated_slg_using_speedangle",
-    ]
-    for col in expected_cols:
-        if col in bbe.columns:
-            agg[col] = grouped[col].mean()
-        else:
-            agg[col] = np.nan
+    ):
+        agg[col] = grouped[col].mean() if col in bbe.columns else np.nan
 
-    # Barrel rate: launch_speed_angle == 6 is the barrel classification
     if "launch_speed_angle" in bbe.columns:
-        barrel_counts = bbe[bbe["launch_speed_angle"] == 6].groupby("batter").size()
-        agg["barrel_rate"] = barrel_counts / agg["bbe_count"]
-        agg["barrel_rate"] = agg["barrel_rate"].fillna(0.0)
+        barrels = bbe[bbe["launch_speed_angle"] == 6].groupby(group_keys).size()
+        agg["barrel_rate"] = (barrels / agg["bbe_count"]).fillna(0.0)
     else:
         agg["barrel_rate"] = np.nan
 
-    # Hard hit rate: exit velocity >= 95 mph
-    hard_hit_counts = bbe[bbe["launch_speed"] >= 95.0].groupby("batter").size()
-    agg["hard_hit_rate"] = hard_hit_counts / agg["bbe_count"]
-    agg["hard_hit_rate"] = agg["hard_hit_rate"].fillna(0.0)
+    hard_hits = bbe[bbe["launch_speed"] >= 95.0].groupby(group_keys).size()
+    agg["hard_hit_rate"] = (hard_hits / agg["bbe_count"]).fillna(0.0)
 
-    # Sweet spot rate: launch angle 8-32 degrees
-    sweet_spot_counts = (
+    sweet = (
         bbe[(bbe["launch_angle"] >= 8) & (bbe["launch_angle"] <= 32)]
-        .groupby("batter")
+        .groupby(group_keys)
         .size()
     )
-    agg["sweet_spot_rate"] = sweet_spot_counts / agg["bbe_count"]
-    agg["sweet_spot_rate"] = agg["sweet_spot_rate"].fillna(0.0)
+    agg["sweet_spot_rate"] = (sweet / agg["bbe_count"]).fillna(0.0)
 
-    # Filter by minimum BBE
-    agg = agg[agg["bbe_count"] >= min_bbe].copy()
+    agg = agg[agg["bbe_count"] >= min_bbe].reset_index()
+    return agg.rename(columns={"batter": "mlbam_id"})
 
-    agg = agg.reset_index()
-    agg = agg.rename(columns={"batter": "mlbam_id"})
 
-    return agg
+def _aggregate_batter_statcast(df: pd.DataFrame, min_bbe: int = 50) -> pd.DataFrame:
+    """Aggregate raw Statcast pitch data into per-batter-season quality metrics."""
+    return _compute_bbe_metrics(_filter_bbe(df), ["batter"], min_bbe)
+
+
+def _aggregate_batter_statcast_weekly(
+    df: pd.DataFrame,
+    min_bbe: int = 5,
+) -> pd.DataFrame:
+    """Aggregate raw Statcast pitch data into per-(batter, ISO-week) quality metrics.
+
+    Uses a lower default ``min_bbe`` than the season aggregator because a
+    single week has ~15-25 BBE for a regular starter.
+    """
+    if "game_date" not in df.columns:
+        raise ValueError(
+            "Weekly aggregation requires a 'game_date' column. "
+            "Re-fetch raw Statcast with the updated _KEEP_COLUMNS."
+        )
+
+    bbe = _filter_bbe(df)
+    if bbe.empty:
+        return pd.DataFrame()
+
+    bbe["game_date"] = pd.to_datetime(bbe["game_date"])
+    iso = bbe["game_date"].dt.isocalendar()
+    bbe["iso_year"] = iso["year"].astype(int)
+    bbe["iso_week"] = iso["week"].astype(int)
+
+    return _compute_bbe_metrics(
+        bbe,
+        group_keys=["batter", "iso_year", "iso_week"],
+        min_bbe=min_bbe,
+        extra_aggs={"week_start_date": ("game_date", "min")},
+    )
 
 
 # Columns to keep when saving raw BBE data as a side-effect of API fetches.
 # Defined locally (not imported from fetch_raw_statcast) to avoid circular imports.
 _RAW_KEEP_COLUMNS = [
     "batter",
+    "game_date",
     "launch_speed",
     "launch_angle",
     "bb_type",
@@ -246,6 +283,80 @@ def fetch_statcast(
     if delay > 0:
         time.sleep(delay)
 
+    return out_path
+
+
+def fetch_statcast_weekly(
+    year: int,
+    out_dir: str | Path = "data/raw",
+    force: bool = False,
+    min_bbe: int = 5,
+) -> Path:
+    """Build per-(batter, iso-week) Statcast aggregates from a cached raw file.
+
+    Reads ``statcast_raw_{year}.parquet`` (which must contain ``game_date``),
+    aggregates by ISO week, and writes ``statcast_agg_week_{year}.parquet``.
+
+    Unlike :func:`fetch_statcast`, this function does not fall back to the API:
+    it requires the raw cache to already be present. Run
+    ``python -m src.data.fetch_raw_statcast --seasons {year}`` first if needed.
+
+    Parameters
+    ----------
+    year:
+        Season year (2016-2025).
+    out_dir:
+        Directory containing ``statcast_raw_{year}.parquet`` and receiving
+        the weekly aggregated output.
+    force:
+        If True, rebuild even if the weekly agg file already exists.
+    min_bbe:
+        Minimum batted-ball events per (batter, week) for inclusion.
+
+    Returns
+    -------
+    Path
+        Path to the saved ``statcast_agg_week_{year}.parquet``.
+    """
+    if year not in _SEASON_DATES:
+        raise ValueError(
+            f"No season date range configured for {year}. "
+            f"Supported years: {sorted(_SEASON_DATES)}"
+        )
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"statcast_agg_week_{year}.parquet"
+
+    if out_path.exists() and not force:
+        logger.info("Skipping %d — weekly agg exists at %s", year, out_path)
+        return out_path
+
+    raw_path = out_dir / f"statcast_raw_{year}.parquet"
+    if not raw_path.exists():
+        raise FileNotFoundError(
+            f"Raw Statcast file missing: {raw_path}. "
+            f"Run: python -m src.data.fetch_raw_statcast --seasons {year}"
+        )
+
+    logger.info("Aggregating weekly Statcast for %d from %s", year, raw_path)
+    raw = pd.read_parquet(raw_path)
+    if "game_date" not in raw.columns:
+        raise ValueError(
+            f"{raw_path} lacks 'game_date' — re-fetch raw with updated "
+            f"_KEEP_COLUMNS: python -m src.data.fetch_raw_statcast "
+            f"--seasons {year} --force"
+        )
+
+    agg = _aggregate_batter_statcast_weekly(raw, min_bbe=min_bbe)
+    agg["season"] = year
+    logger.info(
+        "  Aggregated to %d (batter, week) rows (min %d BBE)", len(agg), min_bbe,
+    )
+
+    agg.to_parquet(out_path, engine="pyarrow", compression="zstd", index=False)
+    size_mb = out_path.stat().st_size / 1_048_576
+    logger.info("  Saved -> %s  (%.1f MB)", out_path, size_mb)
     return out_path
 
 
