@@ -561,21 +561,29 @@ def save_benchmark_outputs(
 # ---------------------------------------------------------------------------
 
 
-def _fit_shrinkage_tau_across_years(
-    years: list[int],
+def _fit_shrinkage_tau_from_years(
+    fit_years: list[int],
     snapshots: pd.DataFrame,
     thresholds: list[int],
     cache_dir: Path,
 ) -> dict[str, float] | None:
-    """Fit per-stat pseudocounts on all available cached-preseason rows.
+    """Fit per-stat pseudocounts on the given ``fit_years`` only.
 
-    Iterates years with a preseason cache on disk, collects all PA-checkpoint
-    rows, and runs ``fit_tau_per_stat`` on the concatenated frame. Falls back
-    to the package defaults (returns ``None``) if no caches are available.
+    Collects PA-checkpoint rows and preseason caches strictly from
+    ``fit_years`` and runs ``fit_tau_per_stat`` on the concatenated frame.
+    Returns ``None`` if no caches exist for any ``fit_years``; callers should
+    then fall back to ``DEFAULT_TAU0``.
+
+    Callers are responsible for ensuring ``fit_years`` is disjoint from the
+    years being scored (e.g. leave-one-year-out) so the reported metrics
+    aren't optimistically biased by the fit.
     """
+    if not fit_years:
+        return None
+
     training_frames: list[pd.DataFrame] = []
     preseason_frames: list[pd.DataFrame] = []
-    for year in years:
+    for year in fit_years:
         cache_path = cache_dir / f"mtl_preseason_{year}.parquet"
         if not cache_path.exists():
             continue
@@ -587,10 +595,6 @@ def _fit_shrinkage_tau_across_years(
         preseason_frames.append(pd.read_parquet(cache_path))
 
     if not training_frames or not preseason_frames:
-        logger.warning(
-            "  No cached preseason predictions available; "
-            "cannot fit shrinkage tau. Using DEFAULT_TAU0.",
-        )
         return None
 
     training_rows = pd.concat(training_frames, ignore_index=True)
@@ -654,8 +658,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--fit-shrinkage-tau", action="store_true",
-        help="Fit shrinkage pseudocounts per stat on evaluation-year snapshots "
-             "before scoring. Defaults use DEFAULT_TAU0.",
+        help="Fit shrinkage pseudocounts per stat via leave-one-year-out "
+             "cross-fitting across --years (needs >= 2 eval years). Default "
+             "uses DEFAULT_TAU0.",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -695,15 +700,30 @@ def main() -> None:
                 seed=args.seed,
             )
 
-    shrinkage_tau: dict[str, float] | None = None
+    # Leave-one-year-out shrinkage tau fit: for each eval year Y, fit on
+    # rows from {years} - {Y} so the reported shrinkage metrics aren't
+    # optimistically biased by tuning on their own ros_* labels. Needs >= 2
+    # eval years; one-year runs fall back to DEFAULT_TAU0.
+    shrinkage_tau_by_year: dict[int, dict[str, float] | None] = {}
     if args.fit_shrinkage_tau and "shrinkage" in args.include:
-        shrinkage_tau = _fit_shrinkage_tau_across_years(
-            years=years,
-            snapshots=snapshots,
-            thresholds=args.thresholds,
-            cache_dir=cache_dir,
-        )
-        logger.info("Fitted shrinkage tau per stat: %s", shrinkage_tau)
+        if len(years) < 2:
+            logger.warning(
+                "--fit-shrinkage-tau needs >= 2 eval years for leave-one-year-out "
+                "cross-fitting; falling back to DEFAULT_TAU0.",
+            )
+        else:
+            for eval_year in years:
+                fit_years = [y for y in years if y != eval_year]
+                shrinkage_tau_by_year[eval_year] = _fit_shrinkage_tau_from_years(
+                    fit_years=fit_years,
+                    snapshots=snapshots,
+                    thresholds=args.thresholds,
+                    cache_dir=cache_dir,
+                )
+            logger.info(
+                "Fitted shrinkage tau (leave-one-year-out): %s",
+                shrinkage_tau_by_year,
+            )
 
     year_results: list[dict] = []
     for year in years:
@@ -718,7 +738,7 @@ def main() -> None:
             preseason=preseason_by_year.get(year),
             prior_pa=args.prior_pa,
             min_ros_pa=args.min_ros_pa,
-            shrinkage_tau=shrinkage_tau,
+            shrinkage_tau=shrinkage_tau_by_year.get(year),
         )
         year_results.append(result)
 

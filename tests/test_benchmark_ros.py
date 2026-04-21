@@ -294,6 +294,75 @@ class TestEvaluateCheckpoint:
 
 
 # ---------------------------------------------------------------------------
+# leave-one-year-out tau fit
+# ---------------------------------------------------------------------------
+
+
+class TestFitShrinkageTauLoyo:
+    def _write_year(self, tmp_path, year: int, n: int = 30) -> None:
+        """Materialize one year's weekly-snapshot + preseason-cache fixtures."""
+        rng = np.random.default_rng(year)
+        pa = rng.integers(150, 400, size=n).astype(float)
+        ab = pa * 0.9
+        obp_pre = rng.uniform(0.28, 0.40, size=n)
+        obp_ytd = rng.uniform(0.24, 0.44, size=n)
+        snap = pd.DataFrame({
+            "mlbam_id": np.arange(n), "season": year,
+            "iso_year": year, "iso_week": 20,
+            "pa_ytd": pa, "ab_ytd": ab,
+            "h_ytd": obp_ytd * ab, "bb_ytd": 0.0, "hbp_ytd": 0.0, "sf_ytd": 0.0,
+            "singles_ytd": 0.0, "doubles_ytd": 0.0, "triples_ytd": 0.0,
+            "hr_ytd": 0.0, "r_ytd": 0.0, "rbi_ytd": 0.0, "sb_ytd": 0.0,
+            # ROS targets: perfectly match preseason prior for year 2023 and
+            # perfectly match the ytd rate for year 2024 so the fitted tau
+            # differs dramatically between the two years.
+            "ros_obp": obp_pre if year == 2023 else obp_ytd,
+            "ros_slg": 0.4, "ros_hr_per_pa": 0.03,
+            "ros_r_per_pa": 0.11, "ros_rbi_per_pa": 0.12, "ros_sb_per_pa": 0.015,
+        })
+        pre = pd.DataFrame({
+            "mlbam_id": np.arange(n), "season": year,
+            "target_obp": obp_pre,
+            "target_slg": 0.4, "target_hr": 0.03,
+            "target_r": 0.11, "target_rbi": 0.12, "target_sb": 0.015,
+        })
+        (tmp_path / f"mtl_preseason_{year}.parquet").parent.mkdir(parents=True, exist_ok=True)
+        pre.to_parquet(tmp_path / f"mtl_preseason_{year}.parquet")
+        return snap
+
+    def test_loyo_tau_differs_per_year(self, tmp_path):
+        # Two synthetic years with opposite optimal taus: fitting 2023 on
+        # 2024's rows (where ros == ytd rate) drives tau toward the lower
+        # bound, while fitting 2024 on 2023's rows (where ros == prior)
+        # drives tau toward the upper bound. If LOYO is NOT applied (i.e.
+        # the helper ignores its fit_years arg and fits on all rows), the
+        # two tau dicts would be identical.
+        snap_23 = self._write_year(tmp_path, 2023)
+        snap_24 = self._write_year(tmp_path, 2024)
+        snapshots = pd.concat([snap_23, snap_24], ignore_index=True)
+
+        tau_for_2023 = br._fit_shrinkage_tau_from_years(
+            fit_years=[2024], snapshots=snapshots,
+            thresholds=[50, 100], cache_dir=tmp_path,
+        )
+        tau_for_2024 = br._fit_shrinkage_tau_from_years(
+            fit_years=[2023], snapshots=snapshots,
+            thresholds=[50, 100], cache_dir=tmp_path,
+        )
+        assert tau_for_2023 is not None and tau_for_2024 is not None
+        # With ros == ytd, the optimal tau is the lower bound.
+        assert tau_for_2023["obp"] < 50.0, tau_for_2023["obp"]
+        # With ros == preseason prior, the optimal tau is the upper bound.
+        assert tau_for_2024["obp"] > 2000.0, tau_for_2024["obp"]
+
+    def test_empty_fit_years_returns_none(self, tmp_path):
+        assert br._fit_shrinkage_tau_from_years(
+            fit_years=[], snapshots=pd.DataFrame(),
+            thresholds=[50], cache_dir=tmp_path,
+        ) is None
+
+
+# ---------------------------------------------------------------------------
 # pool_by_threshold
 # ---------------------------------------------------------------------------
 
