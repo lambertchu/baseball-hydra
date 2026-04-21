@@ -59,8 +59,9 @@ uv run python -m src.data.fetch_game_logs --seasons 2016-2026   # BRef weekly ba
 uv run python -m src.data.build_snapshots --seasons 2016-2026   # Weekly snapshots with ytd + ros targets
 
 # Step 8 (optional): ROS benchmark at PA checkpoints (50 / 100 / 200 / 400)
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025             # persist_observed baseline (no retraining)
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain   # + frozen_preseason and marcel_blend (retrains MTL per year)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025                           # persist_observed baseline (no retraining)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                 # + frozen_preseason, marcel_blend, shrinkage (retrains MTL per year)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau       # fit per-stat τ₀ before scoring
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -145,6 +146,7 @@ Implemented in `src/eval/`:
 - Residual distribution histograms
 - MTL training curves (loss + validation RMSE)
 - **ROS metrics** (`src/eval/ros_metrics.py`): pinball quantile loss, PIT coverage for calibration, per-player PA-checkpoint row selection — used by the ROS benchmark script
+- **Shrinkage baseline** (`src/models/baselines/shrinkage.py`): closed-form Beta-Binomial posterior per stat (OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA) with per-stat pseudocount τ₀ tuned on held-out checkpoints
 
 ## Project Structure
 

@@ -41,6 +41,7 @@ from src.eval.ros_metrics import (
 )
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import TARGET_COLUMNS
+from src.models.baselines.shrinkage import fit_tau_per_stat, predict_shrinkage
 from src.models.utils import align_features, get_model_configs, train_model_for_year
 
 logging.basicConfig(
@@ -53,13 +54,14 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIGS = get_model_configs()
 
 _BASELINES_NO_PRESEASON = ("persist_observed",)
-_BASELINES_NEED_PRESEASON = ("frozen_preseason", "marcel_blend")
+_BASELINES_NEED_PRESEASON = ("frozen_preseason", "marcel_blend", "shrinkage")
 ALL_BASELINES = (*_BASELINES_NO_PRESEASON, *_BASELINES_NEED_PRESEASON)
 
 _BASELINE_DISPLAY = {
     "persist_observed": "PersistObs",
     "frozen_preseason": "FrozenPre",
     "marcel_blend": "MarcelBlend",
+    "shrinkage": "Shrinkage",
 }
 
 _DEFAULT_CACHE_DIR = Path("data/reports/benchmark_ros/preseason")
@@ -283,6 +285,7 @@ def evaluate_checkpoint(
     preseason: pd.DataFrame | None,
     prior_pa: float,
     min_ros_pa: int,
+    shrinkage_tau: dict[str, float] | None = None,
 ) -> dict:
     """Compute point metrics for each baseline at one PA checkpoint.
 
@@ -314,6 +317,14 @@ def evaluate_checkpoint(
         )
         if blended is not None:
             predictions["marcel_blend"] = blended
+    if "shrinkage" in baselines and frozen_matrix is not None:
+        shrunk = predict_shrinkage(
+            checkpoint_rows,
+            tau_per_stat=shrinkage_tau,
+            preseason_matrix=frozen_matrix,
+        )
+        if shrunk is not None:
+            predictions["shrinkage"] = shrunk
 
     if not predictions:
         return {"n_players": 0, "systems": {}}
@@ -353,6 +364,7 @@ def evaluate_year(
     preseason: pd.DataFrame | None,
     prior_pa: float,
     min_ros_pa: int,
+    shrinkage_tau: dict[str, float] | None = None,
 ) -> dict:
     """Run all thresholds for one season's snapshots."""
     yearly = snapshots[snapshots["season"] == year]
@@ -361,6 +373,7 @@ def evaluate_year(
     for t, rows in checkpoints.items():
         result = evaluate_checkpoint(
             rows, baselines, preseason, prior_pa, min_ros_pa,
+            shrinkage_tau=shrinkage_tau,
         )
         out["thresholds"][t] = result
         sys_summary = ", ".join(
@@ -544,6 +557,52 @@ def save_benchmark_outputs(
 
 
 # ---------------------------------------------------------------------------
+# Shrinkage tau fitting
+# ---------------------------------------------------------------------------
+
+
+def _fit_shrinkage_tau_from_years(
+    fit_years: list[int],
+    snapshots: pd.DataFrame,
+    thresholds: list[int],
+    cache_dir: Path,
+) -> dict[str, float] | None:
+    """Fit per-stat pseudocounts on the given ``fit_years`` only.
+
+    Collects PA-checkpoint rows and preseason caches strictly from
+    ``fit_years`` and runs ``fit_tau_per_stat`` on the concatenated frame.
+    Returns ``None`` if no caches exist for any ``fit_years``; callers should
+    then fall back to ``DEFAULT_TAU0``.
+
+    Callers are responsible for ensuring ``fit_years`` is disjoint from the
+    years being scored (e.g. leave-one-year-out) so the reported metrics
+    aren't optimistically biased by the fit.
+    """
+    if not fit_years:
+        return None
+
+    training_frames: list[pd.DataFrame] = []
+    preseason_frames: list[pd.DataFrame] = []
+    for year in fit_years:
+        cache_path = cache_dir / f"mtl_preseason_{year}.parquet"
+        if not cache_path.exists():
+            continue
+        year_snapshots = snapshots[snapshots["season"] == year]
+        checkpoints = pa_checkpoint_rows(year_snapshots, thresholds=thresholds)
+        for rows in checkpoints.values():
+            if len(rows):
+                training_frames.append(rows)
+        preseason_frames.append(pd.read_parquet(cache_path))
+
+    if not training_frames or not preseason_frames:
+        return None
+
+    training_rows = pd.concat(training_frames, ignore_index=True)
+    preseason = pd.concat(preseason_frames, ignore_index=True)
+    return fit_tau_per_stat(training_rows, preseason)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -597,6 +656,12 @@ def main() -> None:
         "--retrain", action="store_true",
         help="Retrain preseason MTL for each year when cache is missing (slow).",
     )
+    parser.add_argument(
+        "--fit-shrinkage-tau", action="store_true",
+        help="Fit shrinkage pseudocounts per stat via leave-one-year-out "
+             "cross-fitting across --years (needs >= 2 eval years). Default "
+             "uses DEFAULT_TAU0.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -620,14 +685,13 @@ def main() -> None:
             data_config = yaml.safe_load(f)
         df_featured = build_features(df, data_config)
 
-    year_results: list[dict] = []
-    for year in years:
-        logger.info("=" * 60)
-        logger.info("Year %d", year)
-        logger.info("=" * 60)
-        preseason = None
-        if need_preseason:
-            preseason = load_or_generate_preseason_cache(
+    # Warm the preseason cache before fitting tau, otherwise a --retrain run
+    # with an empty cache directory would fit on no data and silently fall
+    # back to DEFAULT_TAU0.
+    preseason_by_year: dict[int, pd.DataFrame | None] = {}
+    if need_preseason:
+        for year in years:
+            preseason_by_year[year] = load_or_generate_preseason_cache(
                 year,
                 cache_dir=cache_dir,
                 df_featured=df_featured,
@@ -635,14 +699,46 @@ def main() -> None:
                 retrain=args.retrain,
                 seed=args.seed,
             )
+
+    # Leave-one-year-out shrinkage tau fit: for each eval year Y, fit on
+    # rows from {years} - {Y} so the reported shrinkage metrics aren't
+    # optimistically biased by tuning on their own ros_* labels. Needs >= 2
+    # eval years; one-year runs fall back to DEFAULT_TAU0.
+    shrinkage_tau_by_year: dict[int, dict[str, float] | None] = {}
+    if args.fit_shrinkage_tau and "shrinkage" in args.include:
+        if len(years) < 2:
+            logger.warning(
+                "--fit-shrinkage-tau needs >= 2 eval years for leave-one-year-out "
+                "cross-fitting; falling back to DEFAULT_TAU0.",
+            )
+        else:
+            for eval_year in years:
+                fit_years = [y for y in years if y != eval_year]
+                shrinkage_tau_by_year[eval_year] = _fit_shrinkage_tau_from_years(
+                    fit_years=fit_years,
+                    snapshots=snapshots,
+                    thresholds=args.thresholds,
+                    cache_dir=cache_dir,
+                )
+            logger.info(
+                "Fitted shrinkage tau (leave-one-year-out): %s",
+                shrinkage_tau_by_year,
+            )
+
+    year_results: list[dict] = []
+    for year in years:
+        logger.info("=" * 60)
+        logger.info("Year %d", year)
+        logger.info("=" * 60)
         result = evaluate_year(
             year=year,
             snapshots=snapshots,
             thresholds=args.thresholds,
             baselines=args.include,
-            preseason=preseason,
+            preseason=preseason_by_year.get(year),
             prior_pa=args.prior_pa,
             min_ros_pa=args.min_ros_pa,
+            shrinkage_tau=shrinkage_tau_by_year.get(year),
         )
         year_results.append(result)
 

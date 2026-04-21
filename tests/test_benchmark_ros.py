@@ -28,12 +28,14 @@ def _make_checkpoint_rows(n_players: int = 3, season: int = 2024) -> pd.DataFram
     """Build a minimal checkpoint DataFrame with ytd + ROS target columns."""
     rows = []
     for i in range(n_players):
+        pa = 150.0 + 30.0 * i
+        ab = pa * 0.9
         rows.append({
             "mlbam_id": 100 + i,
             "season": season,
             "iso_year": season,
             "iso_week": 20,
-            "pa_ytd": 150 + 30 * i,
+            "pa_ytd": pa,
             # YTD rates (inputs)
             "obp_ytd": 0.32 + 0.01 * i,
             "slg_ytd": 0.42 + 0.01 * i,
@@ -41,6 +43,19 @@ def _make_checkpoint_rows(n_players: int = 3, season: int = 2024) -> pd.DataFram
             "r_per_pa_ytd": 0.12 + 0.005 * i,
             "rbi_per_pa_ytd": 0.13 + 0.005 * i,
             "sb_per_pa_ytd": 0.02 + 0.005 * i,
+            # YTD counts (needed by the shrinkage baseline)
+            "ab_ytd": ab,
+            "h_ytd": ab * (0.27 + 0.005 * i),
+            "bb_ytd": pa * (0.08 + 0.005 * i),
+            "hbp_ytd": pa * 0.01,
+            "sf_ytd": pa * 0.005,
+            "singles_ytd": ab * 0.18,
+            "doubles_ytd": ab * 0.05,
+            "triples_ytd": ab * 0.005,
+            "hr_ytd": pa * (0.03 + 0.005 * i),
+            "r_ytd": pa * (0.12 + 0.005 * i),
+            "rbi_ytd": pa * (0.13 + 0.005 * i),
+            "sb_ytd": pa * (0.02 + 0.005 * i),
             # ROS targets (outcomes)
             "ros_obp": 0.34 + 0.01 * i,
             "ros_slg": 0.45 + 0.01 * i,
@@ -166,6 +181,28 @@ class TestMarcelBlend:
         assert br.predict_marcel_blend(rows, preseason) is None
 
 
+class TestShrinkagePredictor:
+    def test_baseline_registered(self):
+        # The shrinkage baseline must be part of the preseason-dependent set
+        # so evaluate_checkpoint dispatches it correctly.
+        assert "shrinkage" in br.ALL_BASELINES
+        assert "shrinkage" in br._BASELINES_NEED_PRESEASON
+
+    def test_predict_returns_dataframe(self):
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preds = br.predict_shrinkage(rows, preseason)
+        assert preds is not None
+        assert list(preds.columns) == list(ROS_RATE_TARGETS)
+        assert not preds.isna().any().any()
+
+    def test_zero_overlap_returns_none(self):
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preseason["mlbam_id"] = preseason["mlbam_id"] + 10000
+        assert br.predict_shrinkage(rows, preseason) is None
+
+
 # ---------------------------------------------------------------------------
 # evaluate_checkpoint
 # ---------------------------------------------------------------------------
@@ -196,7 +233,7 @@ class TestEvaluateCheckpoint:
         )
         assert result["n_players"] == 3
         assert set(result["systems"]) == {
-            "persist_observed", "frozen_preseason", "marcel_blend",
+            "persist_observed", "frozen_preseason", "marcel_blend", "shrinkage",
         }
 
     def test_filters_low_ros_pa(self):
@@ -254,6 +291,75 @@ class TestEvaluateCheckpoint:
         )
         assert result["n_players"] == 3
         assert set(result["systems"]) == {"persist_observed"}
+
+
+# ---------------------------------------------------------------------------
+# leave-one-year-out tau fit
+# ---------------------------------------------------------------------------
+
+
+class TestFitShrinkageTauLoyo:
+    def _write_year(self, tmp_path, year: int, n: int = 30) -> None:
+        """Materialize one year's weekly-snapshot + preseason-cache fixtures."""
+        rng = np.random.default_rng(year)
+        pa = rng.integers(150, 400, size=n).astype(float)
+        ab = pa * 0.9
+        obp_pre = rng.uniform(0.28, 0.40, size=n)
+        obp_ytd = rng.uniform(0.24, 0.44, size=n)
+        snap = pd.DataFrame({
+            "mlbam_id": np.arange(n), "season": year,
+            "iso_year": year, "iso_week": 20,
+            "pa_ytd": pa, "ab_ytd": ab,
+            "h_ytd": obp_ytd * ab, "bb_ytd": 0.0, "hbp_ytd": 0.0, "sf_ytd": 0.0,
+            "singles_ytd": 0.0, "doubles_ytd": 0.0, "triples_ytd": 0.0,
+            "hr_ytd": 0.0, "r_ytd": 0.0, "rbi_ytd": 0.0, "sb_ytd": 0.0,
+            # ROS targets: perfectly match preseason prior for year 2023 and
+            # perfectly match the ytd rate for year 2024 so the fitted tau
+            # differs dramatically between the two years.
+            "ros_obp": obp_pre if year == 2023 else obp_ytd,
+            "ros_slg": 0.4, "ros_hr_per_pa": 0.03,
+            "ros_r_per_pa": 0.11, "ros_rbi_per_pa": 0.12, "ros_sb_per_pa": 0.015,
+        })
+        pre = pd.DataFrame({
+            "mlbam_id": np.arange(n), "season": year,
+            "target_obp": obp_pre,
+            "target_slg": 0.4, "target_hr": 0.03,
+            "target_r": 0.11, "target_rbi": 0.12, "target_sb": 0.015,
+        })
+        (tmp_path / f"mtl_preseason_{year}.parquet").parent.mkdir(parents=True, exist_ok=True)
+        pre.to_parquet(tmp_path / f"mtl_preseason_{year}.parquet")
+        return snap
+
+    def test_loyo_tau_differs_per_year(self, tmp_path):
+        # Two synthetic years with opposite optimal taus: fitting 2023 on
+        # 2024's rows (where ros == ytd rate) drives tau toward the lower
+        # bound, while fitting 2024 on 2023's rows (where ros == prior)
+        # drives tau toward the upper bound. If LOYO is NOT applied (i.e.
+        # the helper ignores its fit_years arg and fits on all rows), the
+        # two tau dicts would be identical.
+        snap_23 = self._write_year(tmp_path, 2023)
+        snap_24 = self._write_year(tmp_path, 2024)
+        snapshots = pd.concat([snap_23, snap_24], ignore_index=True)
+
+        tau_for_2023 = br._fit_shrinkage_tau_from_years(
+            fit_years=[2024], snapshots=snapshots,
+            thresholds=[50, 100], cache_dir=tmp_path,
+        )
+        tau_for_2024 = br._fit_shrinkage_tau_from_years(
+            fit_years=[2023], snapshots=snapshots,
+            thresholds=[50, 100], cache_dir=tmp_path,
+        )
+        assert tau_for_2023 is not None and tau_for_2024 is not None
+        # With ros == ytd, the optimal tau is the lower bound.
+        assert tau_for_2023["obp"] < 50.0, tau_for_2023["obp"]
+        # With ros == preseason prior, the optimal tau is the upper bound.
+        assert tau_for_2024["obp"] > 2000.0, tau_for_2024["obp"]
+
+    def test_empty_fit_years_returns_none(self, tmp_path):
+        assert br._fit_shrinkage_tau_from_years(
+            fit_years=[], snapshots=pd.DataFrame(),
+            thresholds=[50], cache_dir=tmp_path,
+        ) is None
 
 
 # ---------------------------------------------------------------------------
