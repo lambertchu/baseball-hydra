@@ -3,7 +3,7 @@
 Covers:
 - Beta-Binomial posterior-mean math (rates and count-per-PA stats)
 - Per-stat ytd (successes, trials) extraction
-- ``ShrinkageBaseline.predict`` end-to-end against the weekly-snapshot schema
+- ``predict_shrinkage`` end-to-end against the weekly-snapshot schema
 - Tau-fitting via minimizing RMSE on held-out rows
 """
 from __future__ import annotations
@@ -14,8 +14,8 @@ import pytest
 
 from src.models.baselines.shrinkage import (
     DEFAULT_TAU0,
-    ShrinkageBaseline,
     fit_tau_per_stat,
+    predict_shrinkage,
     shrinkage_posterior_mean,
     ytd_successes_trials,
 )
@@ -132,7 +132,7 @@ class TestYtdSuccessesTrials:
 
 
 # ---------------------------------------------------------------------------
-# ShrinkageBaseline predict
+# predict_shrinkage
 # ---------------------------------------------------------------------------
 
 
@@ -172,12 +172,11 @@ def _make_preseason_cache(n_players: int = 3, season: int = 2024) -> pd.DataFram
     ])
 
 
-class TestShrinkageBaselinePredict:
+class TestPredictShrinkage:
     def test_predict_returns_ros_rate_targets(self):
         rows = _make_checkpoint_rows()
         preseason = _make_preseason_cache()
-        model = ShrinkageBaseline()
-        preds = model.predict(rows, preseason)
+        preds = predict_shrinkage(rows, preseason)
 
         from src.eval.ros_metrics import ROS_RATE_TARGETS
         assert preds is not None
@@ -189,8 +188,7 @@ class TestShrinkageBaselinePredict:
         rows = _make_checkpoint_rows(n_players=1)
         preseason = _make_preseason_cache(n_players=1)
         tau_overrides = {"obp": 200.0, "slg": 200.0, "hr": 200.0, "r": 200.0, "rbi": 200.0, "sb": 200.0}
-        model = ShrinkageBaseline(tau_per_stat=tau_overrides)
-        preds = model.predict(rows, preseason)
+        preds = predict_shrinkage(rows, preseason, tau_per_stat=tau_overrides)
         assert preds is not None
 
         # Recompute expected OBP shrinkage posterior mean by hand.
@@ -203,29 +201,25 @@ class TestShrinkageBaselinePredict:
     def test_missing_preseason_cols_returns_none(self):
         rows = _make_checkpoint_rows()
         preseason = _make_preseason_cache().drop(columns=["target_sb"])
-        model = ShrinkageBaseline()
-        assert model.predict(rows, preseason) is None
+        assert predict_shrinkage(rows, preseason) is None
 
     def test_missing_id_column_returns_none(self):
         rows = _make_checkpoint_rows().drop(columns=["mlbam_id"])
         preseason = _make_preseason_cache()
-        model = ShrinkageBaseline()
-        assert model.predict(rows, preseason) is None
+        assert predict_shrinkage(rows, preseason) is None
 
     def test_zero_overlap_returns_none(self):
         # Stale preseason cache: no mlbam_id overlap.
         rows = _make_checkpoint_rows()
         preseason = _make_preseason_cache()
         preseason["mlbam_id"] = preseason["mlbam_id"] + 10000
-        model = ShrinkageBaseline()
-        assert model.predict(rows, preseason) is None
+        assert predict_shrinkage(rows, preseason) is None
 
     def test_unmatched_player_row_is_nan(self):
         rows = _make_checkpoint_rows(n_players=3)
         preseason = _make_preseason_cache(n_players=3)
         preseason = preseason[preseason["mlbam_id"] != 100]  # drop player 0
-        model = ShrinkageBaseline()
-        preds = model.predict(rows, preseason)
+        preds = predict_shrinkage(rows, preseason)
         # Player 0 (mlbam_id=100) has no prior, so its row must be all NaN;
         # players 1 and 2 must have valid posterior means.
         assert preds.iloc[0].isna().all()

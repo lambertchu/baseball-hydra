@@ -41,7 +41,7 @@ from src.eval.ros_metrics import (
 )
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import TARGET_COLUMNS
-from src.models.baselines.shrinkage import ShrinkageBaseline, fit_tau_per_stat
+from src.models.baselines.shrinkage import fit_tau_per_stat, predict_shrinkage
 from src.models.utils import align_features, get_model_configs, train_model_for_year
 
 logging.basicConfig(
@@ -266,25 +266,6 @@ def predict_marcel_blend(
     return pd.DataFrame(blended, columns=list(ROS_RATE_TARGETS))
 
 
-def predict_shrinkage(
-    rows: pd.DataFrame,
-    preseason: pd.DataFrame,
-    tau_per_stat: dict[str, float] | None = None,
-    id_col: str = "mlbam_id",
-) -> pd.DataFrame | None:
-    """Bayesian shrinkage baseline: Beta-Binomial posterior per stat.
-
-    Unlike ``marcel_blend`` (fixed PA-based weight for all stats), the
-    shrinkage blend uses a per-stat pseudocount (``tau0``) that reflects how
-    many trials equivalent the preseason prior is worth. Defaults are tuned
-    off stabilisation points; callers can override via ``tau_per_stat`` or
-    fit on held-out data via ``fit_tau_per_stat``.
-    """
-    return ShrinkageBaseline(tau_per_stat=tau_per_stat).predict(
-        rows, preseason, id_col=id_col,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -338,7 +319,9 @@ def evaluate_checkpoint(
             predictions["marcel_blend"] = blended
     if "shrinkage" in baselines and frozen_matrix is not None:
         shrunk = predict_shrinkage(
-            checkpoint_rows, preseason, tau_per_stat=shrinkage_tau,
+            checkpoint_rows,
+            tau_per_stat=shrinkage_tau,
+            preseason_matrix=frozen_matrix,
         )
         if shrunk is not None:
             predictions["shrinkage"] = shrunk
@@ -697,9 +680,21 @@ def main() -> None:
             data_config = yaml.safe_load(f)
         df_featured = build_features(df, data_config)
 
-    # Optional one-pass fit of shrinkage pseudocounts on concatenated checkpoint
-    # rows across years. Uses whichever preseason caches already exist; skips
-    # stats whose prior is unavailable everywhere.
+    # Warm the preseason cache before fitting tau, otherwise a --retrain run
+    # with an empty cache directory would fit on no data and silently fall
+    # back to DEFAULT_TAU0.
+    preseason_by_year: dict[int, pd.DataFrame | None] = {}
+    if need_preseason:
+        for year in years:
+            preseason_by_year[year] = load_or_generate_preseason_cache(
+                year,
+                cache_dir=cache_dir,
+                df_featured=df_featured,
+                data_config=data_config,
+                retrain=args.retrain,
+                seed=args.seed,
+            )
+
     shrinkage_tau: dict[str, float] | None = None
     if args.fit_shrinkage_tau and "shrinkage" in args.include:
         shrinkage_tau = _fit_shrinkage_tau_across_years(
@@ -715,22 +710,12 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info("Year %d", year)
         logger.info("=" * 60)
-        preseason = None
-        if need_preseason:
-            preseason = load_or_generate_preseason_cache(
-                year,
-                cache_dir=cache_dir,
-                df_featured=df_featured,
-                data_config=data_config,
-                retrain=args.retrain,
-                seed=args.seed,
-            )
         result = evaluate_year(
             year=year,
             snapshots=snapshots,
             thresholds=args.thresholds,
             baselines=args.include,
-            preseason=preseason,
+            preseason=preseason_by_year.get(year),
             prior_pa=args.prior_pa,
             min_ros_pa=args.min_ros_pa,
             shrinkage_tau=shrinkage_tau,

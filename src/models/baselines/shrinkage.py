@@ -23,10 +23,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
+from src.eval.metrics import rmse
 from src.eval.ros_metrics import ROS_RATE_TARGETS, ROS_TARGET_STATS
 
 # Per-stat pseudocount defaults (units = "equivalent observed trials").
@@ -61,8 +61,7 @@ def shrinkage_posterior_mean(
     pre = preseason_rate.astype(float)
     succ = successes.astype(float)
     tri = trials.astype(float)
-    denom = tau0 + tri
-    return (tau0 * pre + succ) / denom
+    return (tau0 * pre + succ) / (tau0 + tri)
 
 
 def ytd_successes_trials(rows: pd.DataFrame, stat: str) -> tuple[pd.Series, pd.Series]:
@@ -95,63 +94,71 @@ def ytd_successes_trials(rows: pd.DataFrame, stat: str) -> tuple[pd.Series, pd.S
     return successes, trials
 
 
-class ShrinkageBaseline:
-    """Closed-form Bayesian shrinkage predictor for the six ROS rate targets."""
+def _align_preseason(
+    rows: pd.DataFrame,
+    preseason: pd.DataFrame,
+    id_col: str,
+) -> pd.DataFrame | None:
+    """Broadcast preseason rate predictions onto the checkpoint row order.
 
-    def __init__(self, tau_per_stat: dict[str, float] | None = None) -> None:
-        self.tau_per_stat: dict[str, float] = {
-            **DEFAULT_TAU0,
-            **(tau_per_stat or {}),
-        }
+    Returns a DataFrame with ``ROS_RATE_TARGETS`` columns, or ``None`` when
+    the join is unusable (missing key, missing targets, zero overlap).
+    """
+    if id_col not in rows.columns or id_col not in preseason.columns:
+        return None
+    pre_target_cols = [f"target_{s}" for s in ROS_TARGET_STATS]
+    if any(c not in preseason.columns for c in pre_target_cols):
+        return None
 
-    def predict(
-        self,
-        rows: pd.DataFrame,
-        preseason: pd.DataFrame,
-        id_col: str = "mlbam_id",
-    ) -> pd.DataFrame | None:
-        """Predict ROS rates for checkpoint ``rows`` using ``preseason`` priors.
+    aligned = (
+        preseason.drop_duplicates(subset=[id_col])
+        .set_index(id_col)[pre_target_cols]
+        .reindex(rows[id_col].values)
+        .reset_index(drop=True)
+    )
+    aligned.columns = list(ROS_RATE_TARGETS)
+    if aligned.isna().all(axis=None):
+        return None
+    return aligned
 
-        Returns a DataFrame with columns ordered to match ``ROS_RATE_TARGETS``.
-        Unmatched players (no preseason row for their ``id_col``) yield all-NaN
-        rows. Returns ``None`` when:
 
-        * the join key is missing on either side,
-        * any required ``target_*`` column is absent from ``preseason``, or
-        * the preseason and checkpoint rows have zero ID overlap.
-        """
-        if id_col not in rows.columns or id_col not in preseason.columns:
+def predict_shrinkage(
+    rows: pd.DataFrame,
+    preseason: pd.DataFrame | None = None,
+    tau_per_stat: dict[str, float] | None = None,
+    id_col: str = "mlbam_id",
+    preseason_matrix: pd.DataFrame | None = None,
+) -> pd.DataFrame | None:
+    """Predict ROS rates for checkpoint ``rows`` via Bayesian shrinkage.
+
+    Pass an already-aligned ``preseason_matrix`` (columns named after
+    ``ROS_RATE_TARGETS``) to reuse work a caller has done — for example
+    the benchmark harness shares the same aligned frame between the frozen,
+    marcel-blend, and shrinkage baselines. Otherwise supply the raw
+    ``preseason`` DataFrame and alignment happens internally.
+
+    Returns ``None`` when the preseason cache is unusable (missing join key,
+    missing ``target_*`` columns, zero ID overlap).
+    """
+    if preseason_matrix is None:
+        if preseason is None:
+            raise ValueError("predict_shrinkage requires preseason or preseason_matrix")
+        preseason_matrix = _align_preseason(rows, preseason, id_col=id_col)
+        if preseason_matrix is None:
             return None
 
-        pre_target_cols = [f"target_{s}" for s in ROS_TARGET_STATS]
-        missing_cols = [c for c in pre_target_cols if c not in preseason.columns]
-        if missing_cols:
-            return None
-
-        pre_aligned = (
-            preseason.drop_duplicates(subset=[id_col])
-            .set_index(id_col)[pre_target_cols]
-            .reindex(rows[id_col].values)
-            .reset_index(drop=True)
+    tau = {**DEFAULT_TAU0, **(tau_per_stat or {})}
+    out = pd.DataFrame(index=rows.index, columns=list(ROS_RATE_TARGETS), dtype=float)
+    for stat, ros_col in zip(ROS_TARGET_STATS, ROS_RATE_TARGETS):
+        succ, trials = ytd_successes_trials(rows, stat)
+        posterior = shrinkage_posterior_mean(
+            preseason_rate=preseason_matrix[ros_col].reset_index(drop=True),
+            successes=succ.reset_index(drop=True),
+            trials=trials.reset_index(drop=True),
+            tau0=tau[stat],
         )
-        if pre_aligned.isna().all(axis=None):
-            return None
-
-        out = pd.DataFrame(index=rows.index, columns=list(ROS_RATE_TARGETS), dtype=float)
-        for stat, ros_col, pre_col in zip(
-            ROS_TARGET_STATS,
-            ROS_RATE_TARGETS,
-            pre_target_cols,
-        ):
-            succ, trials = ytd_successes_trials(rows, stat)
-            posterior = shrinkage_posterior_mean(
-                preseason_rate=pre_aligned[pre_col].reset_index(drop=True),
-                successes=succ.reset_index(drop=True),
-                trials=trials.reset_index(drop=True),
-                tau0=self.tau_per_stat[stat],
-            )
-            out[ros_col] = posterior.values
-        return out
+        out[ros_col] = posterior.values
+    return out
 
 
 def fit_tau_per_stat(
@@ -176,7 +183,6 @@ def fit_tau_per_stat(
     stats = list(stats) if stats is not None else list(ROS_TARGET_STATS)
     fitted: dict[str, float] = {s: DEFAULT_TAU0[s] for s in stats}
 
-    # Only fit stats whose preseason prior is available; others keep the default.
     fittable = [s for s in stats if f"target_{s}" in preseason.columns]
     if not fittable:
         return fitted
@@ -200,14 +206,18 @@ def fit_tau_per_stat(
         mask = joined[[pre_col, ros_col]].notna().all(axis=1)
         if not mask.any():
             continue
-        subset = joined.loc[mask].reset_index(drop=True)
-        pre_rate = subset[pre_col].astype(float)
-        y_true = subset[ros_col].astype(float)
+        subset = joined.loc[mask]
+        # Pre-cast to numpy once so the bounded Brent search (15-30
+        # evaluations) doesn't re-float the same Series on every call.
+        pre_arr = subset[pre_col].to_numpy(dtype=float)
+        y_arr = subset[ros_col].to_numpy(dtype=float)
         succ, trials = ytd_successes_trials(subset, stat)
+        succ_arr = succ.to_numpy(dtype=float)
+        trials_arr = trials.to_numpy(dtype=float)
 
-        def loss(tau: float, pre_rate=pre_rate, succ=succ, trials=trials, y_true=y_true) -> float:
-            preds = shrinkage_posterior_mean(pre_rate, succ, trials, tau0=float(tau))
-            return float(np.sqrt(np.mean((preds.values - y_true.values) ** 2)))
+        def loss(tau: float, p=pre_arr, s=succ_arr, t=trials_arr, y=y_arr) -> float:
+            preds = (tau * p + s) / (tau + t)
+            return rmse(y, preds)
 
         result = minimize_scalar(loss, bounds=bounds, method="bounded")
         fitted[stat] = float(result.x)
