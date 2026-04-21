@@ -247,6 +247,65 @@ class TestFitTauPerStat:
         for tau in fitted.values():
             assert tau > 0
 
+    def test_multi_year_joins_on_id_and_season(self):
+        # Same player in two seasons with very different priors. The 2023
+        # prior is close to the 2023 ROS outcome; the 2024 prior is way off.
+        # If the fit erroneously drops-by-id only, one year's observations get
+        # matched to the wrong year's prior, and the fit degrades noticeably.
+        n_per_year = 40
+        rng = np.random.default_rng(3)
+
+        def year_rows(year: int, pre_obp: float, ros_obp_target: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+            pa = rng.integers(150, 350, size=n_per_year).astype(float)
+            ab = pa.copy()  # succ = H, trials = AB+BB+HBP+SF; set others to 0 so trials == ab
+            succ = rng.uniform(0.28, 0.38, size=n_per_year) * pa
+            rows = pd.DataFrame({
+                "mlbam_id": np.arange(n_per_year),
+                "season": year,
+                "pa_ytd": pa, "ab_ytd": ab,
+                "h_ytd": succ, "bb_ytd": 0.0, "hbp_ytd": 0.0, "sf_ytd": 0.0,
+                "singles_ytd": 0.0, "doubles_ytd": 0.0, "triples_ytd": 0.0,
+                "hr_ytd": 0.0, "r_ytd": 0.0, "rbi_ytd": 0.0, "sb_ytd": 0.0,
+                "ros_obp": ros_obp_target + rng.normal(0, 0.005, n_per_year),
+                "ros_slg": 0.4, "ros_hr_per_pa": 0.03,
+                "ros_r_per_pa": 0.11, "ros_rbi_per_pa": 0.12, "ros_sb_per_pa": 0.015,
+            })
+            pre = pd.DataFrame({
+                "mlbam_id": np.arange(n_per_year),
+                "season": year,
+                "target_obp": pre_obp,
+                "target_slg": 0.4, "target_hr": 0.03,
+                "target_r": 0.11, "target_rbi": 0.12, "target_sb": 0.015,
+            })
+            return rows, pre
+
+        rows_23, pre_23 = year_rows(2023, pre_obp=0.32, ros_obp_target=0.32)
+        rows_24, pre_24 = year_rows(2024, pre_obp=0.36, ros_obp_target=0.36)
+        training_rows = pd.concat([rows_23, rows_24], ignore_index=True)
+        preseason = pd.concat([pre_23, pre_24], ignore_index=True)
+
+        fitted = fit_tau_per_stat(training_rows, preseason, stats=["obp"])
+        # With a correct season-aware join, 80 rows survive and each gets the
+        # right-year prior (which happens to match their ros_obp target), so
+        # the optimal tau is essentially infinite → fitted should hit the
+        # upper search bound. With the buggy id-only join, only 40 rows
+        # survive (one year's prior gets applied to both years' observations),
+        # introducing systematic error that pulls tau toward the middle.
+        assert fitted["obp"] > 2000.0, (
+            f"Expected per-year priors to each match their ros target, "
+            f"producing tau -> upper bound; got {fitted['obp']}. "
+            f"Likely joining on mlbam_id only and losing the season dimension."
+        )
+
+    def test_falls_back_when_preseason_missing_stat(self):
+        rows = _make_checkpoint_rows(n_players=5)
+        preseason = _make_preseason_cache(n_players=5).drop(columns=["target_sb"])
+        fitted = fit_tau_per_stat(rows, preseason)
+        assert fitted["sb"] == pytest.approx(DEFAULT_TAU0["sb"])
+        # Non-missing stats still get fit (produce positive finite values).
+        for other in ("obp", "slg", "hr", "r", "rbi"):
+            assert fitted[other] > 0
+
     def test_minimum_near_known_optimum(self):
         # Build synthetic rows where the optimal tau for OBP is ~200:
         # each row's ros_obp equals the blend of a known preseason and ytd using tau=200.

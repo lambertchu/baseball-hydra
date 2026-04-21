@@ -163,31 +163,42 @@ def fit_tau_per_stat(
 ) -> dict[str, float]:
     """Fit ``tau0`` per stat by minimizing RMSE of posterior mean vs actual ROS rate.
 
-    One scalar bounded minimization per stat via scipy's Brent method.
-    Rows missing either the preseason prior or the observed ROS target for a
-    stat are skipped for that stat; a stat with no usable rows falls back to
-    its ``DEFAULT_TAU0``.
+    One scalar bounded minimization per stat via scipy's Brent method. A stat
+    whose ``target_{stat}`` column is missing from ``preseason``, or that
+    has no usable (non-NaN) rows after the join, falls back to its
+    ``DEFAULT_TAU0``.
+
+    When both ``training_rows`` and ``preseason`` include a ``season``
+    column, the join is keyed on ``(id_col, season)`` so multi-year fits
+    align each observation with its correct-year prior rather than
+    collapsing a player's seasons together.
     """
     stats = list(stats) if stats is not None else list(ROS_TARGET_STATS)
+    fitted: dict[str, float] = {s: DEFAULT_TAU0[s] for s in stats}
 
-    pre_indexed = preseason.drop_duplicates(subset=[id_col]).set_index(id_col)
-    joined = training_rows.merge(
-        pre_indexed[[f"target_{s}" for s in stats]],
-        left_on=id_col,
-        right_index=True,
-        how="inner",
+    # Only fit stats whose preseason prior is available; others keep the default.
+    fittable = [s for s in stats if f"target_{s}" in preseason.columns]
+    if not fittable:
+        return fitted
+
+    join_cols = [id_col]
+    if "season" in training_rows.columns and "season" in preseason.columns:
+        join_cols.append("season")
+
+    pre_target_cols = [f"target_{s}" for s in fittable]
+    pre_subset = (
+        preseason[join_cols + pre_target_cols]
+        .drop_duplicates(subset=join_cols)
     )
+    joined = training_rows.merge(pre_subset, on=join_cols, how="inner")
 
-    fitted: dict[str, float] = {}
-    for stat in stats:
+    for stat in fittable:
         ros_col = ROS_RATE_TARGETS[ROS_TARGET_STATS.index(stat)]
         pre_col = f"target_{stat}"
         if ros_col not in joined.columns:
-            fitted[stat] = DEFAULT_TAU0[stat]
             continue
         mask = joined[[pre_col, ros_col]].notna().all(axis=1)
         if not mask.any():
-            fitted[stat] = DEFAULT_TAU0[stat]
             continue
         subset = joined.loc[mask].reset_index(drop=True)
         pre_rate = subset[pre_col].astype(float)
