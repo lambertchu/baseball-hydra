@@ -41,6 +41,7 @@ from src.eval.ros_metrics import (
 )
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import TARGET_COLUMNS
+from src.models.baselines.shrinkage import ShrinkageBaseline, fit_tau_per_stat
 from src.models.utils import align_features, get_model_configs, train_model_for_year
 
 logging.basicConfig(
@@ -53,13 +54,14 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIGS = get_model_configs()
 
 _BASELINES_NO_PRESEASON = ("persist_observed",)
-_BASELINES_NEED_PRESEASON = ("frozen_preseason", "marcel_blend")
+_BASELINES_NEED_PRESEASON = ("frozen_preseason", "marcel_blend", "shrinkage")
 ALL_BASELINES = (*_BASELINES_NO_PRESEASON, *_BASELINES_NEED_PRESEASON)
 
 _BASELINE_DISPLAY = {
     "persist_observed": "PersistObs",
     "frozen_preseason": "FrozenPre",
     "marcel_blend": "MarcelBlend",
+    "shrinkage": "Shrinkage",
 }
 
 _DEFAULT_CACHE_DIR = Path("data/reports/benchmark_ros/preseason")
@@ -264,6 +266,25 @@ def predict_marcel_blend(
     return pd.DataFrame(blended, columns=list(ROS_RATE_TARGETS))
 
 
+def predict_shrinkage(
+    rows: pd.DataFrame,
+    preseason: pd.DataFrame,
+    tau_per_stat: dict[str, float] | None = None,
+    id_col: str = "mlbam_id",
+) -> pd.DataFrame | None:
+    """Bayesian shrinkage baseline: Beta-Binomial posterior per stat.
+
+    Unlike ``marcel_blend`` (fixed PA-based weight for all stats), the
+    shrinkage blend uses a per-stat pseudocount (``tau0``) that reflects how
+    many trials equivalent the preseason prior is worth. Defaults are tuned
+    off stabilisation points; callers can override via ``tau_per_stat`` or
+    fit on held-out data via ``fit_tau_per_stat``.
+    """
+    return ShrinkageBaseline(tau_per_stat=tau_per_stat).predict(
+        rows, preseason, id_col=id_col,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -283,6 +304,7 @@ def evaluate_checkpoint(
     preseason: pd.DataFrame | None,
     prior_pa: float,
     min_ros_pa: int,
+    shrinkage_tau: dict[str, float] | None = None,
 ) -> dict:
     """Compute point metrics for each baseline at one PA checkpoint.
 
@@ -314,6 +336,12 @@ def evaluate_checkpoint(
         )
         if blended is not None:
             predictions["marcel_blend"] = blended
+    if "shrinkage" in baselines and frozen_matrix is not None:
+        shrunk = predict_shrinkage(
+            checkpoint_rows, preseason, tau_per_stat=shrinkage_tau,
+        )
+        if shrunk is not None:
+            predictions["shrinkage"] = shrunk
 
     if not predictions:
         return {"n_players": 0, "systems": {}}
@@ -353,6 +381,7 @@ def evaluate_year(
     preseason: pd.DataFrame | None,
     prior_pa: float,
     min_ros_pa: int,
+    shrinkage_tau: dict[str, float] | None = None,
 ) -> dict:
     """Run all thresholds for one season's snapshots."""
     yearly = snapshots[snapshots["season"] == year]
@@ -361,6 +390,7 @@ def evaluate_year(
     for t, rows in checkpoints.items():
         result = evaluate_checkpoint(
             rows, baselines, preseason, prior_pa, min_ros_pa,
+            shrinkage_tau=shrinkage_tau,
         )
         out["thresholds"][t] = result
         sys_summary = ", ".join(
@@ -544,6 +574,48 @@ def save_benchmark_outputs(
 
 
 # ---------------------------------------------------------------------------
+# Shrinkage tau fitting
+# ---------------------------------------------------------------------------
+
+
+def _fit_shrinkage_tau_across_years(
+    years: list[int],
+    snapshots: pd.DataFrame,
+    thresholds: list[int],
+    cache_dir: Path,
+) -> dict[str, float] | None:
+    """Fit per-stat pseudocounts on all available cached-preseason rows.
+
+    Iterates years with a preseason cache on disk, collects all PA-checkpoint
+    rows, and runs ``fit_tau_per_stat`` on the concatenated frame. Falls back
+    to the package defaults (returns ``None``) if no caches are available.
+    """
+    training_frames: list[pd.DataFrame] = []
+    preseason_frames: list[pd.DataFrame] = []
+    for year in years:
+        cache_path = cache_dir / f"mtl_preseason_{year}.parquet"
+        if not cache_path.exists():
+            continue
+        year_snapshots = snapshots[snapshots["season"] == year]
+        checkpoints = pa_checkpoint_rows(year_snapshots, thresholds=thresholds)
+        for rows in checkpoints.values():
+            if len(rows):
+                training_frames.append(rows)
+        preseason_frames.append(pd.read_parquet(cache_path))
+
+    if not training_frames or not preseason_frames:
+        logger.warning(
+            "  No cached preseason predictions available; "
+            "cannot fit shrinkage tau. Using DEFAULT_TAU0.",
+        )
+        return None
+
+    training_rows = pd.concat(training_frames, ignore_index=True)
+    preseason = pd.concat(preseason_frames, ignore_index=True)
+    return fit_tau_per_stat(training_rows, preseason)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -597,6 +669,11 @@ def main() -> None:
         "--retrain", action="store_true",
         help="Retrain preseason MTL for each year when cache is missing (slow).",
     )
+    parser.add_argument(
+        "--fit-shrinkage-tau", action="store_true",
+        help="Fit shrinkage pseudocounts per stat on evaluation-year snapshots "
+             "before scoring. Defaults use DEFAULT_TAU0.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -619,6 +696,19 @@ def main() -> None:
         with open(args.data_config) as f:
             data_config = yaml.safe_load(f)
         df_featured = build_features(df, data_config)
+
+    # Optional one-pass fit of shrinkage pseudocounts on concatenated checkpoint
+    # rows across years. Uses whichever preseason caches already exist; skips
+    # stats whose prior is unavailable everywhere.
+    shrinkage_tau: dict[str, float] | None = None
+    if args.fit_shrinkage_tau and "shrinkage" in args.include:
+        shrinkage_tau = _fit_shrinkage_tau_across_years(
+            years=years,
+            snapshots=snapshots,
+            thresholds=args.thresholds,
+            cache_dir=cache_dir,
+        )
+        logger.info("Fitted shrinkage tau per stat: %s", shrinkage_tau)
 
     year_results: list[dict] = []
     for year in years:
@@ -643,6 +733,7 @@ def main() -> None:
             preseason=preseason,
             prior_pa=args.prior_pa,
             min_ros_pa=args.min_ros_pa,
+            shrinkage_tau=shrinkage_tau,
         )
         year_results.append(result)
 

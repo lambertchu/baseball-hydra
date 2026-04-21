@@ -28,12 +28,14 @@ def _make_checkpoint_rows(n_players: int = 3, season: int = 2024) -> pd.DataFram
     """Build a minimal checkpoint DataFrame with ytd + ROS target columns."""
     rows = []
     for i in range(n_players):
+        pa = 150.0 + 30.0 * i
+        ab = pa * 0.9
         rows.append({
             "mlbam_id": 100 + i,
             "season": season,
             "iso_year": season,
             "iso_week": 20,
-            "pa_ytd": 150 + 30 * i,
+            "pa_ytd": pa,
             # YTD rates (inputs)
             "obp_ytd": 0.32 + 0.01 * i,
             "slg_ytd": 0.42 + 0.01 * i,
@@ -41,6 +43,19 @@ def _make_checkpoint_rows(n_players: int = 3, season: int = 2024) -> pd.DataFram
             "r_per_pa_ytd": 0.12 + 0.005 * i,
             "rbi_per_pa_ytd": 0.13 + 0.005 * i,
             "sb_per_pa_ytd": 0.02 + 0.005 * i,
+            # YTD counts (needed by the shrinkage baseline)
+            "ab_ytd": ab,
+            "h_ytd": ab * (0.27 + 0.005 * i),
+            "bb_ytd": pa * (0.08 + 0.005 * i),
+            "hbp_ytd": pa * 0.01,
+            "sf_ytd": pa * 0.005,
+            "singles_ytd": ab * 0.18,
+            "doubles_ytd": ab * 0.05,
+            "triples_ytd": ab * 0.005,
+            "hr_ytd": pa * (0.03 + 0.005 * i),
+            "r_ytd": pa * (0.12 + 0.005 * i),
+            "rbi_ytd": pa * (0.13 + 0.005 * i),
+            "sb_ytd": pa * (0.02 + 0.005 * i),
             # ROS targets (outcomes)
             "ros_obp": 0.34 + 0.01 * i,
             "ros_slg": 0.45 + 0.01 * i,
@@ -166,6 +181,28 @@ class TestMarcelBlend:
         assert br.predict_marcel_blend(rows, preseason) is None
 
 
+class TestShrinkagePredictor:
+    def test_baseline_registered(self):
+        # The shrinkage baseline must be part of the preseason-dependent set
+        # so evaluate_checkpoint dispatches it correctly.
+        assert "shrinkage" in br.ALL_BASELINES
+        assert "shrinkage" in br._BASELINES_NEED_PRESEASON
+
+    def test_predict_returns_dataframe(self):
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preds = br.predict_shrinkage(rows, preseason)
+        assert preds is not None
+        assert list(preds.columns) == list(ROS_RATE_TARGETS)
+        assert not preds.isna().any().any()
+
+    def test_zero_overlap_returns_none(self):
+        rows = _make_checkpoint_rows()
+        preseason = _make_preseason_cache()
+        preseason["mlbam_id"] = preseason["mlbam_id"] + 10000
+        assert br.predict_shrinkage(rows, preseason) is None
+
+
 # ---------------------------------------------------------------------------
 # evaluate_checkpoint
 # ---------------------------------------------------------------------------
@@ -196,7 +233,7 @@ class TestEvaluateCheckpoint:
         )
         assert result["n_players"] == 3
         assert set(result["systems"]) == {
-            "persist_observed", "frozen_preseason", "marcel_blend",
+            "persist_observed", "frozen_preseason", "marcel_blend", "shrinkage",
         }
 
     def test_filters_low_ros_pa(self):
