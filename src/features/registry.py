@@ -855,6 +855,12 @@ COUNT_STATS: frozenset[str] = frozenset({"hr", "r", "rbi", "sb"})
 # Identity / metadata columns (not features, not targets)
 ID_COLUMNS: list[str] = ["mlbam_id", "idfg", "name", "team", "season"]
 
+# Primary join key for player-season frames (weekly snapshots + preseason).
+# Kept here (rather than inside a specific model module) so every consumer —
+# training pipeline, benchmark scripts, data layer — references the same
+# constant and cannot drift on e.g. column ordering.
+PLAYER_SEASON_KEY: tuple[str, ...] = ("mlbam_id", "season")
+
 # Group → feature-list mapping for config-driven selection
 _GROUP_MAP: dict[FeatureGroup, list[FeatureMeta]] = {
     FeatureGroup.BATTING: BATTING_FEATURES,

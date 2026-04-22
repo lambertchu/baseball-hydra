@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 
 
@@ -137,23 +136,3 @@ def _assert_no_leakage(
                     f"({id_col}, {season_col}) keys between splits "
                     f"{a!r} and {b!r}; sample: {sorted(overlap)[:3]}"
                 )
-
-
-def cutoff_sample_subsample(
-    snapshots: pd.DataFrame,
-    rng: np.random.Generator,
-    k_cutoffs_per_player: int | None = None,
-) -> pd.DataFrame:
-    """Optionally down-sample cutoffs per ``(player, season)``.
-
-    Current implementation: ``k_cutoffs_per_player=None`` → passthrough.
-    The signature is reserved for a future mode that samples ``k`` cutoffs
-    per player-season to keep epoch-size manageable on large snapshot tables.
-    """
-    if k_cutoffs_per_player is None:
-        return snapshots
-    # Placeholder: actual subsampling will be added in a later change.
-    raise NotImplementedError(
-        "cutoff_sample_subsample with k_cutoffs_per_player != None is not "
-        "implemented yet; pass None for the current passthrough behavior."
-    )

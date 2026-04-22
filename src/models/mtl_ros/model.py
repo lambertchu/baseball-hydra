@@ -56,6 +56,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from src.models.mtl.model import ResidualBlock
 from src.models.mtl_ros.loss import MultiTaskQuantileLoss
+from src.models.utils import reconstruct_scaler, scale_and_clamp
 from src.models.utils import to_float64_array as _to_float64_array
 
 logger = logging.getLogger(__name__)
@@ -287,29 +288,6 @@ class _QuantileDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Scaler helpers (copied from preseason; staying decoupled from its internals)
-# ---------------------------------------------------------------------------
-
-
-def _reconstruct_scaler(
-    mean: torch.Tensor,
-    scale: torch.Tensor,
-    var: torch.Tensor,
-    n_samples_seen: torch.Tensor | int,
-) -> StandardScaler:
-    """Rebuild a fitted StandardScaler from saved tensor parameters."""
-    scaler = StandardScaler()
-    scaler.mean_ = mean.numpy()
-    scaler.scale_ = scale.numpy()
-    scaler.var_ = var.numpy()
-    if isinstance(n_samples_seen, torch.Tensor):
-        n_samples_seen = n_samples_seen.numpy()
-    scaler.n_samples_seen_ = n_samples_seen
-    scaler.n_features_in_ = len(mean)
-    return scaler
-
-
-# ---------------------------------------------------------------------------
 # Forecaster (sklearn-style wrapper)
 # ---------------------------------------------------------------------------
 
@@ -407,15 +385,13 @@ class MTLQuantileForecaster:
     def _scale_and_clamp(self, X_arr: np.ndarray) -> np.ndarray:
         """Scale inputs and clip to the training per-feature range.
 
-        Some features (e.g. bat speed) are constant in training seasons and
-        real in test seasons; without clipping the network sees inputs
-        far outside its training distribution.
+        Thin wrapper over :func:`src.models.utils.scale_and_clamp` that
+        reads the fitted scaler + train-time per-feature min/max from
+        ``self``. Kept as a method so call sites don't change.
         """
-        X_scaled = self.feature_scaler_.transform(X_arr)
-        X_scaled = np.nan_to_num(X_scaled, nan=0.0)
-        if self.feature_min_ is not None and self.feature_max_ is not None:
-            np.clip(X_scaled, self.feature_min_, self.feature_max_, out=X_scaled)
-        return X_scaled
+        return scale_and_clamp(
+            X_arr, self.feature_scaler_, self.feature_min_, self.feature_max_
+        )
 
     def _make_scheduler(
         self,
@@ -789,13 +765,13 @@ class MTLQuantileForecaster:
         instance.feature_names_ = state["feature_names"]
         instance.target_names_ = state["target_names"]
 
-        instance.feature_scaler_ = _reconstruct_scaler(
+        instance.feature_scaler_ = reconstruct_scaler(
             state["feature_scaler_mean"],
             state["feature_scaler_scale"],
             state["feature_scaler_var"],
             state["feature_scaler_n_samples"],
         )
-        instance.target_scaler_ = _reconstruct_scaler(
+        instance.target_scaler_ = reconstruct_scaler(
             state["target_scaler_mean"],
             state["target_scaler_scale"],
             state["target_scaler_var"],

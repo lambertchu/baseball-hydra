@@ -54,7 +54,7 @@ from src.eval.ros_metrics import (
     quantile_loss,
 )
 from src.features.pipeline import build_features, extract_xy
-from src.features.registry import TARGET_COLUMNS
+from src.features.registry import PLAYER_SEASON_KEY, TARGET_COLUMNS
 from src.models.baselines.shrinkage import (
     DEFAULT_QUANTILE_TAUS,
     fit_tau_per_stat,
@@ -334,7 +334,7 @@ def _phase2_feature_matrix(
     """
     from src.features.in_season import compute_in_season_features
 
-    feature_names: list[str] = list(getattr(ensemble, "feature_names_", []))
+    feature_names: list[str] = list(ensemble.feature_names_)
     if not feature_names:
         return None
 
@@ -351,14 +351,13 @@ def _phase2_feature_matrix(
     )
 
     if preseason is not None:
-        overlap = (set(enriched.columns) & set(preseason.columns)) - {
-            "mlbam_id",
-            "season",
-        }
+        overlap = (set(enriched.columns) & set(preseason.columns)) - set(
+            PLAYER_SEASON_KEY
+        )
         pre = preseason.drop(columns=list(overlap)) if overlap else preseason
         enriched = enriched.merge(
             pre,
-            on=["mlbam_id", "season"],
+            on=list(PLAYER_SEASON_KEY),
             how="left",
         )
 

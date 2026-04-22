@@ -12,7 +12,6 @@ import pandas as pd
 
 from src.models.mtl_ros.splits import (
     SplitConfig,
-    cutoff_sample_subsample,
     walk_forward_split,
 )
 
@@ -148,22 +147,3 @@ class TestSplitConfig:
         assert (splits["train"]["yr"] <= 2022).all()
         assert (splits["val"]["yr"] == 2023).all()
         assert (splits["test"]["yr"] == 2024).all()
-
-
-# ---------------------------------------------------------------------------
-# cutoff_sample_subsample (passthrough for now)
-# ---------------------------------------------------------------------------
-
-
-class TestCutoffSubsample:
-    def test_cutoff_sample_subsample_passthrough(self):
-        snaps = _make_snapshots()
-        import numpy as np
-
-        rng = np.random.default_rng(0)
-        out = cutoff_sample_subsample(snaps, rng=rng, k_cutoffs_per_player=None)
-        assert len(out) == len(snaps)
-        # Order preserved (passthrough should not shuffle).
-        pd.testing.assert_frame_equal(
-            out.reset_index(drop=True), snaps.reset_index(drop=True)
-        )

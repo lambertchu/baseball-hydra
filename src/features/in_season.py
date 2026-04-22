@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.rate_helpers import obp_slg, safe_div
+from src.features.registry import IN_SEASON_FEATURES
 
 # Design choice: a single league-average full-season PA constant used to
 # scale ``pa_ytd`` into a season-progress signal. Keeping it as a constant
@@ -37,39 +38,11 @@ from src.data.rate_helpers import obp_slg, safe_div
 # if we want player-specific denominators.
 EXPECTED_SEASON_PA: int = 650
 
-# Public list of in-season feature names in registry order. Mirrors the
-# entries in ``src.features.registry.IN_SEASON_FEATURES`` and is kept
-# here for ergonomic import from the feature computation module.
-IN_SEASON_FEATURE_NAMES: tuple[str, ...] = (
-    # YTD passthroughs (10)
-    "pa_ytd",
-    "obp_ytd",
-    "slg_ytd",
-    "hr_per_pa_ytd",
-    "r_per_pa_ytd",
-    "rbi_per_pa_ytd",
-    "sb_per_pa_ytd",
-    "iso_ytd",
-    "bb_rate_ytd",
-    "k_rate_ytd",
-    # Trail4w rates (10)
-    "trail4w_pa",
-    "trail4w_obp",
-    "trail4w_slg",
-    "trail4w_hr_per_pa",
-    "trail4w_r_per_pa",
-    "trail4w_rbi_per_pa",
-    "trail4w_sb_per_pa",
-    "trail4w_iso",
-    "trail4w_bb_rate",
-    "trail4w_k_rate",
-    # Derived timing (2)
-    "week_index",
-    "pa_fraction",
-    # IL stubs (2)
-    "days_on_il_ytd",
-    "has_il_data",
-)
+# Public list of in-season feature names in registry order. Derived from
+# ``src.features.registry.IN_SEASON_FEATURES`` so the two sides cannot
+# drift. If the registry reorders, this tuple and the output column order
+# of :func:`compute_in_season_features` move together.
+IN_SEASON_FEATURE_NAMES: tuple[str, ...] = tuple(f.name for f in IN_SEASON_FEATURES)
 
 _YTD_PASSTHROUGH: tuple[str, ...] = (
     "pa_ytd",

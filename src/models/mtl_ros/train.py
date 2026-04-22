@@ -12,10 +12,6 @@ Wires together the Phase 2 building blocks:
   targets, PA target, sample weights) directly to
   :class:`src.models.mtl_ros.model.MTLQuantileEnsembleForecaster`, which
   wraps them internally via its own ``_QuantileDataset``.
-  :class:`src.models.mtl_ros.dataset.ROSSnapshotDataset` is a building
-  block reserved for future custom loaders (e.g. streaming weekly
-  snapshots off-disk) and is **not** currently wired through
-  :func:`train_ros`.
 * :class:`src.models.mtl_ros.splits.walk_forward_split` — season-boundary
   train/val/test split.
 * :class:`src.models.mtl_ros.model.MTLQuantileEnsembleForecaster` — the
@@ -56,7 +52,7 @@ import pandas as pd
 import yaml
 
 from src.features.in_season import compute_in_season_features
-from src.features.registry import FeatureGroup, get_feature_names
+from src.features.registry import PLAYER_SEASON_KEY, FeatureGroup, get_feature_names
 from src.models.mtl_ros.dataset import compute_sample_weights
 from src.models.mtl_ros.model import MTLQuantileEnsembleForecaster
 from src.models.mtl_ros.splits import SplitConfig
@@ -80,8 +76,6 @@ ROS_RATE_TARGETS: tuple[str, ...] = (
     "ros_sb_per_pa",
 )
 ROS_PA_TARGET: str = "ros_pa"
-
-_ID_COLS: tuple[str, ...] = ("mlbam_id", "season")
 
 
 # ---------------------------------------------------------------------------
@@ -223,15 +217,15 @@ def _join_preseason(
     if preseason is None or preseason.empty:
         return snapshots_with_in_season
     # Preseason must carry the join keys.
-    missing_keys = [k for k in _ID_COLS if k not in preseason.columns]
+    missing_keys = [k for k in PLAYER_SEASON_KEY if k not in preseason.columns]
     if missing_keys:
         raise KeyError(
             f"Preseason frame missing join keys {missing_keys}; "
-            f"expected columns {_ID_COLS}"
+            f"expected columns {PLAYER_SEASON_KEY}"
         )
     # Join key columns shouldn't be suffixed; everything else can collide.
     overlap = (set(snapshots_with_in_season.columns) & set(preseason.columns)) - set(
-        _ID_COLS
+        PLAYER_SEASON_KEY
     )
     if overlap:
         logger.info(
@@ -242,7 +236,7 @@ def _join_preseason(
         preseason = preseason.drop(columns=list(overlap))
     return snapshots_with_in_season.merge(
         preseason,
-        on=list(_ID_COLS),
+        on=list(PLAYER_SEASON_KEY),
         how="left",
         validate="many_to_one",
     )
@@ -282,7 +276,6 @@ def train_ros(
     min_ytd_pa = int(train_cfg.get("min_ytd_pa", 50))
     recency_lambda = float(train_cfg.get("recency_decay_lambda", 0.30))
 
-    # 1. Load snapshots + preseason.
     if snapshots_df is None:
         snapshots_df = _load_snapshots_from_paths(config, seasons=None)
     else:
@@ -305,19 +298,19 @@ def train_ros(
     elif preseason_df.empty:
         preseason_df = None
 
-    # 2. Compute in-season features on the snapshot frame.
     in_season = compute_in_season_features(snapshots_df)
-    # Drop any duplicate columns in the snapshot frame before concatenating.
+    # Drop duplicate columns from the snapshot frame before concat so the
+    # in-season versions win.
     dup_cols = [c for c in in_season.columns if c in snapshots_df.columns]
     snapshots_enriched = pd.concat(
         [snapshots_df.drop(columns=dup_cols, errors="ignore"), in_season],
         axis=1,
     )
 
-    # 3. Join preseason onto the enriched snapshot frame.
     joined = _join_preseason(snapshots_enriched, preseason_df)
 
-    # 4. Filter by min_ytd_pa before the split so split sizes are realistic.
+    # Filter before the split so reported split sizes reflect what the model
+    # actually trains on.
     if min_ytd_pa > 0 and "pa_ytd" in joined.columns:
         before = len(joined)
         joined = joined.loc[joined["pa_ytd"].fillna(0) >= min_ytd_pa].reset_index(
@@ -327,11 +320,9 @@ def train_ros(
             "min_ytd_pa=%d filter: %d → %d rows", min_ytd_pa, before, len(joined)
         )
 
-    # 5. Select feature columns (honour the registry + config feature groups).
     feature_cols = _select_feature_columns(joined, config)
     logger.info("Selected %d feature columns", len(feature_cols))
 
-    # 6. Walk-forward split.
     split_cfg = SplitConfig.from_dict(config["splits"])
     splits = split_cfg.build(joined)
     train_frame = splits["train"]
@@ -347,14 +338,12 @@ def train_ros(
         len(val_frame) if val_frame is not None else "(none)",
     )
 
-    # 7. Drop rows with NaN ROS rate targets in training — the loss would
-    #    otherwise produce NaN gradients.  (Val split keeps NaNs; the loss
-    #    mask would just skip them if we cared, but we don't require val.)
+    # NaN ROS rate targets would otherwise produce NaN gradients — the loss
+    # averages over all rows rather than masking. Drop before materialising.
     train_frame = _drop_rows_with_nan_targets(train_frame, ROS_RATE_TARGETS)
     if val_frame is not None:
         val_frame = _drop_rows_with_nan_targets(val_frame, ROS_RATE_TARGETS)
 
-    # 8. Materialise training matrices.
     X_train = train_frame[feature_cols]
     y_train = train_frame[list(ROS_RATE_TARGETS)]
     pa_train = np.asarray(
@@ -362,7 +351,6 @@ def train_ros(
         dtype=np.float64,
     )
 
-    # 9. Sample weights (recency × sqrt(ros_pa+1)).
     sample_weights = compute_sample_weights(
         train_frame,
         recency_lambda=recency_lambda,
@@ -380,7 +368,6 @@ def train_ros(
         )
         eval_set = (X_val, y_val, pa_val)
 
-    # 10. Train the ensemble.
     ensemble = MTLQuantileEnsembleForecaster(config)
     ensemble.fit(
         X_train,
@@ -401,7 +388,7 @@ def _drop_rows_with_nan_targets(
     frame: pd.DataFrame,
     target_cols: Sequence[str],
 ) -> pd.DataFrame:
-    """Drop rows whose rate targets are all NaN (and clamp per-target NaN elsewhere).
+    """Drop rows whose rate targets contain any NaN.
 
     Rationale: the quantile loss currently averages over all batch rows, so
     a fully-NaN target row would poison every task.  Partial NaNs (e.g. a
