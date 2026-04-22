@@ -275,6 +275,44 @@ class TestPredictShrinkage:
         assert not preds.iloc[1].isna().any()
         assert not preds.iloc[2].isna().any()
 
+    def test_multi_season_alignment_attaches_correct_year(self):
+        # Same player in two seasons with deliberately different priors.
+        # An id-only join would collapse both rows to the 2023 prior.
+        rows_23 = _make_checkpoint_rows(n_players=1, season=2023)
+        rows_24 = _make_checkpoint_rows(n_players=1, season=2024)
+        rows = pd.concat([rows_23, rows_24], ignore_index=True)
+        preseason = pd.DataFrame(
+            [
+                {
+                    "mlbam_id": 100,
+                    "season": 2023,
+                    "target_obp": 0.30,
+                    "target_slg": 0.40,
+                    "target_hr": 0.02,
+                    "target_r": 0.10,
+                    "target_rbi": 0.11,
+                    "target_sb": 0.01,
+                },
+                {
+                    "mlbam_id": 100,
+                    "season": 2024,
+                    "target_obp": 0.37,
+                    "target_slg": 0.50,
+                    "target_hr": 0.07,
+                    "target_r": 0.15,
+                    "target_rbi": 0.16,
+                    "target_sb": 0.04,
+                },
+            ]
+        )
+        # Use a huge tau0 so posterior mean ≈ prior — makes the alignment
+        # easy to verify by looking at the output.
+        tau_overrides = dict.fromkeys(DEFAULT_TAU0, 1e6)
+        preds = predict_shrinkage(rows, preseason, tau_per_stat=tau_overrides)
+        assert preds is not None
+        assert float(preds["ros_obp"].iloc[0]) == pytest.approx(0.30, abs=1e-3)
+        assert float(preds["ros_obp"].iloc[1]) == pytest.approx(0.37, abs=1e-3)
+
 
 # ---------------------------------------------------------------------------
 # fit_tau_per_stat

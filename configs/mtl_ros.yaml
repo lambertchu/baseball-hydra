@@ -39,10 +39,17 @@ data:
   preseason_path: "data/merged_batter_data.parquet"
   # Preseason feature groups to include alongside the in-season features.
   # Keep conservative — nothing here should be computed from current-season data.
+  #
+  # `team_stats` disabled: the stored team stats (team_runs_per_game, team_ops,
+  # team_sb, ...) are END-OF-SEASON totals in `merged_batter_data.parquet`.
+  # Joining them on (mlbam_id, season) would leak future information into
+  # mid-season rows (a week-10 row would get the full-season team OPS). Re-enable
+  # once we build a team-through-week-W aggregate.
+  # `park_factors` are static per-stadium per-year — safe to include.
   preseason_feature_groups:
     age: true
     park_factors: true
-    team_stats: true
+    team_stats: false
     temporal: true
   include_in_season_features: true
 

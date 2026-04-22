@@ -92,6 +92,51 @@ def _derive_singles(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _collapse_duplicate_weekly_rows(
+    batting_wk: pd.DataFrame,
+    key_cols: list[str],
+) -> pd.DataFrame:
+    """Aggregate duplicate ``(mlbam_id, iso_year, iso_week)`` rows to one.
+
+    BRef's ``batting_stats_range`` can emit multiple rows for the same
+    ``(player, week)`` when a player was on multiple teams that week
+    (mid-week trade, September call-up). Those rows carry per-team counting
+    stats; to keep the downstream ``one_to_one`` merge validation honest we
+    sum the counting columns and keep the first non-null value for the rest.
+    """
+    if batting_wk.empty:
+        return batting_wk
+    dup_mask = batting_wk.duplicated(subset=key_cols, keep=False)
+    if not dup_mask.any():
+        return batting_wk
+
+    logger.info(
+        "Collapsing %d duplicate weekly rows across %d keys (likely mid-week "
+        "trades / call-ups)",
+        int(dup_mask.sum()),
+        int(batting_wk.loc[dup_mask, key_cols].drop_duplicates().shape[0]),
+    )
+
+    # Partition columns: sum the additive counts, keep-first for everything else.
+    sum_cols = [c for c in _WEEK_COUNTS if c in batting_wk.columns]
+    # "singles" is derived upstream; include it in the sum when present so
+    # traded-player weeks roll up correctly.
+    if "singles" in batting_wk.columns and "singles" not in sum_cols:
+        sum_cols.append("singles")
+    other_cols = [
+        c for c in batting_wk.columns if c not in key_cols and c not in sum_cols
+    ]
+    agg_map: dict[str, str] = {c: "sum" for c in sum_cols}
+    agg_map.update({c: "first" for c in other_cols})
+    collapsed = (
+        batting_wk.groupby(key_cols, dropna=False, sort=False)
+        .agg(agg_map)
+        .reset_index()
+    )
+    # Restore the original column order for downstream callers that rely on it.
+    return collapsed[[c for c in batting_wk.columns if c in collapsed.columns]]
+
+
 def _merge_weekly_sources(
     batting_wk: pd.DataFrame,
     statcast_wk: pd.DataFrame,
@@ -103,6 +148,12 @@ def _merge_weekly_sources(
     # BRef occasionally returns NA mlbIDs for minor-league players already filtered.
     batting_wk = batting_wk.dropna(subset=["mlbam_id"]).copy()
     batting_wk["mlbam_id"] = batting_wk["mlbam_id"].astype("int64")
+
+    # BRef emits per-team rows when a player is traded mid-week; collapse
+    # them so the one_to_one merge below is valid.
+    batting_wk = _collapse_duplicate_weekly_rows(
+        batting_wk, key_cols=["mlbam_id", "iso_year", "iso_week"]
+    )
 
     statcast_wk = statcast_wk.copy()
     statcast_wk["mlbam_id"] = statcast_wk["mlbam_id"].astype("int64")

@@ -269,7 +269,9 @@ def _load_or_train_phase2_ensemble(
     Mirrors the frozen_preseason cache pattern: train once and save under
     ``phase2_cache_dir/year_{eval_year}/``, then reload for subsequent runs.
     The training data covers every snapshot year strictly before ``eval_year``
-    (train_end_season = eval_year - 1).
+    (train_end_season = eval_year - 1). Returns ``None`` on cache miss when
+    ``retrain`` is False — callers then skip phase2 for this year rather
+    than silently kicking off an expensive training run.
     """
     # Local imports: keep the benchmark importable even when torch is absent
     # (e.g. tests that only exercise point baselines).
@@ -281,6 +283,15 @@ def _load_or_train_phase2_ensemble(
     if meta_path.exists() and not retrain:
         logger.info("  Loaded Phase 2 ensemble cache %s", year_dir)
         return MTLQuantileEnsembleForecaster.load(year_dir)
+
+    if not retrain:
+        logger.warning(
+            "  Phase 2 cache missing for %d (%s); skipping phase2 for this year. "
+            "Pass --retrain to train from scratch.",
+            eval_year,
+            year_dir,
+        )
+        return None
 
     snapshots = _phase2_training_snapshots_for_year(eval_year, raw_dir)
     preseason_df: pd.DataFrame | None = None
@@ -310,6 +321,28 @@ def _load_or_train_phase2_ensemble(
     ensemble.save(year_dir)
     logger.info("  Cached Phase 2 ensemble → %s", year_dir)
     return ensemble
+
+
+def _phase2_eval_preseason_frame(
+    eval_year: int,
+    df_featured: pd.DataFrame | None,
+) -> pd.DataFrame | None:
+    """Return the preseason feature frame for ``eval_year`` scoring.
+
+    The phase2 ensemble was trained with preseason features joined on
+    ``(mlbam_id, season)`` from ``df_featured``. At eval time we need the
+    SAME feature columns in the SAME raw space — just for the eval year's
+    rows — so the predict-time reindex/standard-scale step stays in-distribution.
+    Using the MTL preseason prediction cache (which only has ``target_*``
+    columns) would leave every non-target feature missing and trigger the
+    fillna-0 path, making phase2 metrics meaningless.
+    """
+    if df_featured is None:
+        return None
+    eval_pre = df_featured.loc[df_featured["season"] == eval_year]
+    if eval_pre.empty:
+        return None
+    return eval_pre.copy()
 
 
 def _phase2_feature_matrix(
@@ -433,8 +466,14 @@ def _preseason_rate_matrix(
     rows: pd.DataFrame,
     preseason: pd.DataFrame,
     id_col: str = "mlbam_id",
+    season_col: str = "season",
 ) -> pd.DataFrame | None:
     """Broadcast preseason rate predictions onto the checkpoint row order.
+
+    The join is keyed on ``(id_col, season_col)`` when both frames carry
+    ``season`` so multi-season rows don't collapse onto the same player's
+    first-season prior. When either side lacks ``season`` we fall back to the
+    id-only join (safe for single-year calls).
 
     Returns ``None`` when the join key is missing or all predictions are NA;
     returns a DataFrame with ``ROS_RATE_TARGETS`` columns (NaN for unmatched
@@ -452,10 +491,22 @@ def _preseason_rate_matrix(
         )
         return None
 
-    pre_indexed = preseason.drop_duplicates(subset=[id_col]).set_index(id_col)[
-        pre_target_cols
-    ]
-    aligned = pre_indexed.reindex(rows[id_col].values).reset_index(drop=True)
+    use_season = season_col in rows.columns and season_col in preseason.columns
+    if use_season:
+        key_cols = [id_col, season_col]
+        pre_indexed = preseason.drop_duplicates(subset=key_cols).set_index(key_cols)[
+            pre_target_cols
+        ]
+        keys = pd.MultiIndex.from_arrays(
+            [rows[id_col].values, rows[season_col].values],
+            names=key_cols,
+        )
+        aligned = pre_indexed.reindex(keys).reset_index(drop=True)
+    else:
+        pre_indexed = preseason.drop_duplicates(subset=[id_col]).set_index(id_col)[
+            pre_target_cols
+        ]
+        aligned = pre_indexed.reindex(rows[id_col].values).reset_index(drop=True)
     aligned.columns = list(ROS_RATE_TARGETS)
     # Zero-overlap cache: an all-NaN matrix would drive the downstream
     # non-NaN intersection filter to empty, wiping even baselines that don't
@@ -551,6 +602,7 @@ def evaluate_checkpoint(
     shrinkage_tau: dict[str, float] | None = None,
     phase2_ensemble=None,
     phase2_config: dict | None = None,
+    phase2_preseason: pd.DataFrame | None = None,
     quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS,
 ) -> dict:
     """Compute point + quantile metrics for each baseline at one PA checkpoint.
@@ -616,11 +668,18 @@ def evaluate_checkpoint(
                 )
 
     if "phase2" in baselines and phase2_ensemble is not None:
+        # Phase 2 must score against the same feature frame it trained with —
+        # the preseason MTL prediction cache (which only has target_* columns)
+        # would leave age/park/temporal missing and fill them with zero after
+        # scaling. Fall back to ``preseason`` only when no phase2-specific
+        # frame is available (e.g. when --retrain was not passed and
+        # df_featured wasn't loaded).
+        phase2_pre_arg = phase2_preseason if phase2_preseason is not None else preseason
         phase2_preds = predict_phase2(
             checkpoint_rows,
             phase2_ensemble,
             phase2_config or {},
-            preseason,
+            phase2_pre_arg,
         )
         if phase2_preds is not None:
             point_df, q_arr = phase2_preds
@@ -692,6 +751,7 @@ def evaluate_year(
     shrinkage_tau: dict[str, float] | None = None,
     phase2_ensemble=None,
     phase2_config: dict | None = None,
+    phase2_preseason: pd.DataFrame | None = None,
     quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS,
 ) -> dict:
     """Run all thresholds for one season's snapshots."""
@@ -708,6 +768,7 @@ def evaluate_year(
             shrinkage_tau=shrinkage_tau,
             phase2_ensemble=phase2_ensemble,
             phase2_config=phase2_config,
+            phase2_preseason=phase2_preseason,
             quantile_taus=quantile_taus,
         )
         out["thresholds"][t] = result
@@ -1250,6 +1311,10 @@ def main() -> None:
     # Failing to train/load gracefully skips phase2 without crashing the
     # rest of the benchmark.
     phase2_by_year: dict[int, object | None] = {}
+    # Phase 2 scoring needs the SAME raw preseason feature frame the
+    # ensemble trained against (age/park/temporal in raw space) — see
+    # ``_phase2_eval_preseason_frame`` for the rationale.
+    phase2_preseason_by_year: dict[int, pd.DataFrame | None] = {}
     phase2_config: dict | None = None
     if want_phase2:
         phase2_config_path = Path(args.phase2_config)
@@ -1282,6 +1347,9 @@ def main() -> None:
                         exc,
                     )
                     phase2_by_year[year] = None
+                phase2_preseason_by_year[year] = _phase2_eval_preseason_frame(
+                    year, df_featured
+                )
 
     year_results: list[dict] = []
     for year in years:
@@ -1299,6 +1367,7 @@ def main() -> None:
             shrinkage_tau=shrinkage_tau_by_year.get(year),
             phase2_ensemble=phase2_by_year.get(year),
             phase2_config=phase2_config,
+            phase2_preseason=phase2_preseason_by_year.get(year),
         )
         year_results.append(result)
 

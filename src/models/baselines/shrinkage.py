@@ -107,8 +107,15 @@ def _align_preseason(
     rows: pd.DataFrame,
     preseason: pd.DataFrame,
     id_col: str,
+    season_col: str = "season",
 ) -> pd.DataFrame | None:
     """Broadcast preseason rate predictions onto the checkpoint row order.
+
+    The join is keyed on ``(id_col, season_col)`` when both frames carry
+    ``season`` so multi-season rows don't collapse onto the same player's
+    first-season prior (which would attach the wrong year's prior to a
+    checkpoint row). When either side lacks ``season`` we fall back to the
+    id-only join, which is safe for single-year calls.
 
     Returns a DataFrame with ``ROS_RATE_TARGETS`` columns, or ``None`` when
     the join is unusable (missing key, missing targets, zero overlap).
@@ -119,12 +126,27 @@ def _align_preseason(
     if any(c not in preseason.columns for c in pre_target_cols):
         return None
 
-    aligned = (
-        preseason.drop_duplicates(subset=[id_col])
-        .set_index(id_col)[pre_target_cols]
-        .reindex(rows[id_col].values)
-        .reset_index(drop=True)
-    )
+    use_season = season_col in rows.columns and season_col in preseason.columns
+    if use_season:
+        key_cols = [id_col, season_col]
+        pre_dedup = preseason.drop_duplicates(subset=key_cols).set_index(key_cols)[
+            pre_target_cols
+        ]
+        # Build a MultiIndex from the rows' (id, season) pairs in the
+        # checkpoint row order; reindex preserves row alignment and produces
+        # NaN for unmatched (player, season) combinations.
+        keys = pd.MultiIndex.from_arrays(
+            [rows[id_col].values, rows[season_col].values],
+            names=key_cols,
+        )
+        aligned = pre_dedup.reindex(keys).reset_index(drop=True)
+    else:
+        aligned = (
+            preseason.drop_duplicates(subset=[id_col])
+            .set_index(id_col)[pre_target_cols]
+            .reindex(rows[id_col].values)
+            .reset_index(drop=True)
+        )
     aligned.columns = list(ROS_RATE_TARGETS)
     if aligned.isna().all(axis=None):
         return None
