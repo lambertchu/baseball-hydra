@@ -12,19 +12,23 @@ Inputs are rows from ``data/raw/weekly_snapshots_{year}.parquet`` (see
 
 The snapshot builder produces trailing-window sums for count stats only, so
 ``compute_in_season_features`` derives trail4w rate equivalents on the fly
-using the same OBP/SLG/ISO formulas that ``build_snapshots._add_ytd_rates``
-uses for season-to-date stats. If the caller has already attached a
-``trail4w_<rate>`` column (e.g. a downstream enrichment step), that value is
-used verbatim.
+using the same OBP/SLG formulas that ``build_snapshots._add_ytd_rates`` uses
+for season-to-date stats. Both sides share
+:func:`src.data.rate_helpers.obp_slg` so the formulas cannot drift. If the
+caller has already attached a ``trail4w_<rate>`` column (e.g. a downstream
+enrichment step), that value is used verbatim.
 
 All 24 output columns are listed in ``IN_SEASON_FEATURE_NAMES`` and are
 registered with ``FeatureGroup.IN_SEASON`` in
 ``src.features.registry``.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from src.data.rate_helpers import obp_slg, safe_div
 
 # Design choice: a single league-average full-season PA constant used to
 # scale ``pa_ytd`` into a season-progress signal. Keeping it as a constant
@@ -38,21 +42,46 @@ EXPECTED_SEASON_PA: int = 650
 # here for ergonomic import from the feature computation module.
 IN_SEASON_FEATURE_NAMES: tuple[str, ...] = (
     # YTD passthroughs (10)
-    "pa_ytd", "obp_ytd", "slg_ytd", "hr_per_pa_ytd", "r_per_pa_ytd",
-    "rbi_per_pa_ytd", "sb_per_pa_ytd", "iso_ytd", "bb_rate_ytd", "k_rate_ytd",
+    "pa_ytd",
+    "obp_ytd",
+    "slg_ytd",
+    "hr_per_pa_ytd",
+    "r_per_pa_ytd",
+    "rbi_per_pa_ytd",
+    "sb_per_pa_ytd",
+    "iso_ytd",
+    "bb_rate_ytd",
+    "k_rate_ytd",
     # Trail4w rates (10)
-    "trail4w_pa", "trail4w_obp", "trail4w_slg", "trail4w_hr_per_pa",
-    "trail4w_r_per_pa", "trail4w_rbi_per_pa", "trail4w_sb_per_pa",
-    "trail4w_iso", "trail4w_bb_rate", "trail4w_k_rate",
+    "trail4w_pa",
+    "trail4w_obp",
+    "trail4w_slg",
+    "trail4w_hr_per_pa",
+    "trail4w_r_per_pa",
+    "trail4w_rbi_per_pa",
+    "trail4w_sb_per_pa",
+    "trail4w_iso",
+    "trail4w_bb_rate",
+    "trail4w_k_rate",
     # Derived timing (2)
-    "week_index", "pa_fraction",
+    "week_index",
+    "pa_fraction",
     # IL stubs (2)
-    "days_on_il_ytd", "has_il_data",
+    "days_on_il_ytd",
+    "has_il_data",
 )
 
 _YTD_PASSTHROUGH: tuple[str, ...] = (
-    "pa_ytd", "obp_ytd", "slg_ytd", "hr_per_pa_ytd", "r_per_pa_ytd",
-    "rbi_per_pa_ytd", "sb_per_pa_ytd", "iso_ytd", "bb_rate_ytd", "k_rate_ytd",
+    "pa_ytd",
+    "obp_ytd",
+    "slg_ytd",
+    "hr_per_pa_ytd",
+    "r_per_pa_ytd",
+    "rbi_per_pa_ytd",
+    "sb_per_pa_ytd",
+    "iso_ytd",
+    "bb_rate_ytd",
+    "k_rate_ytd",
 )
 
 
@@ -63,20 +92,15 @@ def _col_or_nan(df: pd.DataFrame, name: str) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
-def _safe_div(num: pd.Series, den: pd.Series) -> pd.Series:
-    """Elementwise division; NaN where the denominator is zero, NaN, or negative."""
-    n = num.to_numpy(dtype=float, copy=False)
-    d = den.to_numpy(dtype=float, copy=False)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        result = np.where(d > 0, n / d, np.nan)
-    return pd.Series(result, index=num.index, dtype=float)
-
-
 def _trail4w_obp_slg(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """Compute trail4w OBP and SLG from trail4w count components.
 
-    Mirrors ``src.data.build_snapshots._obp_slg`` so that the in-season
-    feature matrix uses the same formulas as the snapshot layer.
+    Delegates the arithmetic to :func:`src.data.rate_helpers.obp_slg` so the
+    in-season features and the snapshot builder share a single formula, then
+    masks rows where every OBP (or SLG) count component was missing so a
+    fully-NaN input produces NaN output instead of 0 (the snapshot builder
+    doesn't need that guard because its weekly aggregation always produces
+    at least one populated component per row).
     """
     h = _col_or_nan(df, "trail4w_h")
     bb = _col_or_nan(df, "trail4w_bb")
@@ -88,32 +112,30 @@ def _trail4w_obp_slg(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     triples = _col_or_nan(df, "trail4w_triples")
     hr = _col_or_nan(df, "trail4w_hr")
 
-    obp_den = ab.fillna(0) + bb.fillna(0) + hbp.fillna(0) + sf.fillna(0)
-    obp_num = h.fillna(0) + bb.fillna(0) + hbp.fillna(0)
-    # Keep NaN rows where every component was missing (denominator would be 0
-    # even though we filled NaN→0 above).
-    any_component = pd.concat([h, bb, hbp, sf, ab], axis=1).notna().any(axis=1)
-    obp = _safe_div(obp_num, obp_den).where(any_component, np.nan)
+    obp, slg = obp_slg(h, bb, hbp, sf, singles, doubles, triples, hr, ab)
 
-    tb = (
-        singles.fillna(0) + 2 * doubles.fillna(0)
-        + 3 * triples.fillna(0) + 4 * hr.fillna(0)
+    # Keep NaN rows where every component was missing — otherwise the
+    # ``fillna(0)`` inside ``obp_slg`` would silently produce 0/0 → NaN
+    # for OBP but masks real "no data" states from "zero on-base".
+    obp_has_data = pd.concat([h, bb, hbp, sf, ab], axis=1).notna().any(axis=1)
+    slg_has_data = (
+        pd.concat([singles, doubles, triples, hr, ab], axis=1).notna().any(axis=1)
     )
-    slg_any_component = pd.concat([singles, doubles, triples, hr, ab], axis=1).notna().any(axis=1)
-    slg = _safe_div(tb, ab).where(slg_any_component, np.nan)
-
-    return obp, slg
+    return obp.where(obp_has_data, np.nan), slg.where(slg_has_data, np.nan)
 
 
 def _trail4w_rate_or_passthrough(
-    df: pd.DataFrame, out_name: str, num_col: str, den_col: str,
+    df: pd.DataFrame,
+    out_name: str,
+    num_col: str,
+    den_col: str,
 ) -> pd.Series:
     """Return pre-computed trail4w rate column if present, else derive from counts."""
     if out_name in df.columns:
         return df[out_name].astype(float)
     num = _col_or_nan(df, num_col)
     den = _col_or_nan(df, den_col)
-    return _safe_div(num, den)
+    return safe_div(num, den)
 
 
 def compute_in_season_features(
@@ -150,46 +172,47 @@ def compute_in_season_features(
     # PA passthrough from counts column (with NaN fallback).
     out["trail4w_pa"] = _col_or_nan(src, "trail4w_pa")
 
-    if "trail4w_obp" in src.columns:
-        out["trail4w_obp"] = src["trail4w_obp"].astype(float)
-    else:
-        trail_obp, trail_slg_from_obp = _trail4w_obp_slg(src)
-        out["trail4w_obp"] = trail_obp
-
-    if "trail4w_slg" in src.columns:
-        out["trail4w_slg"] = src["trail4w_slg"].astype(float)
-    else:
-        # If OBP was passed through we still need SLG — recompute either way
-        # to avoid relying on variable state from the branch above.
-        _, trail_slg = _trail4w_obp_slg(src)
-        out["trail4w_slg"] = trail_slg
+    # Compute derived OBP/SLG once; use only the components we need to fill
+    # whichever columns weren't pre-computed on the snapshot.
+    need_obp = "trail4w_obp" not in src.columns
+    need_slg = "trail4w_slg" not in src.columns
+    if need_obp or need_slg:
+        derived_obp, derived_slg = _trail4w_obp_slg(src)
+    out["trail4w_obp"] = (
+        src["trail4w_obp"].astype(float) if not need_obp else derived_obp
+    )
+    out["trail4w_slg"] = (
+        src["trail4w_slg"].astype(float) if not need_slg else derived_slg
+    )
 
     # Per-PA rate decomposition (HR, R, RBI, SB) + discipline (BB, K) +
     # ISO = SLG - AVG.  Each honours a pre-computed column when available.
     out["trail4w_hr_per_pa"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_hr_per_pa", "trail4w_hr", "trail4w_pa",
+        src, "trail4w_hr_per_pa", "trail4w_hr", "trail4w_pa"
     )
     out["trail4w_r_per_pa"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_r_per_pa", "trail4w_r", "trail4w_pa",
+        src, "trail4w_r_per_pa", "trail4w_r", "trail4w_pa"
     )
     out["trail4w_rbi_per_pa"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_rbi_per_pa", "trail4w_rbi", "trail4w_pa",
+        src, "trail4w_rbi_per_pa", "trail4w_rbi", "trail4w_pa"
     )
     out["trail4w_sb_per_pa"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_sb_per_pa", "trail4w_sb", "trail4w_pa",
+        src, "trail4w_sb_per_pa", "trail4w_sb", "trail4w_pa"
     )
     out["trail4w_bb_rate"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_bb_rate", "trail4w_bb", "trail4w_pa",
+        src, "trail4w_bb_rate", "trail4w_bb", "trail4w_pa"
     )
     out["trail4w_k_rate"] = _trail4w_rate_or_passthrough(
-        src, "trail4w_k_rate", "trail4w_so", "trail4w_pa",
+        src, "trail4w_k_rate", "trail4w_so", "trail4w_pa"
     )
 
     if "trail4w_iso" in src.columns:
         out["trail4w_iso"] = src["trail4w_iso"].astype(float)
     else:
         slg_series = out["trail4w_slg"]
-        avg_series = _safe_div(_col_or_nan(src, "trail4w_h"), _col_or_nan(src, "trail4w_ab"))
+        avg_series = safe_div(
+            _col_or_nan(src, "trail4w_h"), _col_or_nan(src, "trail4w_ab")
+        )
         out["trail4w_iso"] = slg_series - avg_series
 
     # 3. Derived timing features.

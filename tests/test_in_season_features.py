@@ -134,16 +134,33 @@ class TestRegistryIntegration:
         names = {f.name for f in ALL_FEATURES if f.group == FeatureGroup.IN_SEASON}
         expected = {
             # YTD passthroughs (10)
-            "pa_ytd", "obp_ytd", "slg_ytd", "hr_per_pa_ytd", "r_per_pa_ytd",
-            "rbi_per_pa_ytd", "sb_per_pa_ytd", "iso_ytd", "bb_rate_ytd", "k_rate_ytd",
+            "pa_ytd",
+            "obp_ytd",
+            "slg_ytd",
+            "hr_per_pa_ytd",
+            "r_per_pa_ytd",
+            "rbi_per_pa_ytd",
+            "sb_per_pa_ytd",
+            "iso_ytd",
+            "bb_rate_ytd",
+            "k_rate_ytd",
             # Trail4w rates (10)
-            "trail4w_pa", "trail4w_obp", "trail4w_slg", "trail4w_hr_per_pa",
-            "trail4w_r_per_pa", "trail4w_rbi_per_pa", "trail4w_sb_per_pa",
-            "trail4w_iso", "trail4w_bb_rate", "trail4w_k_rate",
+            "trail4w_pa",
+            "trail4w_obp",
+            "trail4w_slg",
+            "trail4w_hr_per_pa",
+            "trail4w_r_per_pa",
+            "trail4w_rbi_per_pa",
+            "trail4w_sb_per_pa",
+            "trail4w_iso",
+            "trail4w_bb_rate",
+            "trail4w_k_rate",
             # Derived timing (2)
-            "week_index", "pa_fraction",
+            "week_index",
+            "pa_fraction",
             # IL stubs (2)
-            "days_on_il_ytd", "has_il_data",
+            "days_on_il_ytd",
+            "has_il_data",
         }
         assert names == expected
 
@@ -165,9 +182,15 @@ class TestRegistryIntegration:
     def test_toggle_off_excludes_in_season(self):
         """Disabling in_season removes all 24 features from get_feature_names."""
         enabled = {
-            "batting": True, "statcast": True, "non_contact": True,
-            "sprint_speed": True, "bat_speed": True, "park_factors": True,
-            "team_stats": True, "age": True, "temporal": True,
+            "batting": True,
+            "statcast": True,
+            "non_contact": True,
+            "sprint_speed": True,
+            "bat_speed": True,
+            "park_factors": True,
+            "team_stats": True,
+            "age": True,
+            "temporal": True,
             "in_season": False,
         }
         names = set(get_feature_names(enabled))
@@ -177,31 +200,59 @@ class TestRegistryIntegration:
     def test_toggle_on_includes_in_season(self):
         """Enabling in_season adds all 24 features."""
         enabled = {
-            "batting": True, "statcast": True, "non_contact": True,
-            "sprint_speed": True, "bat_speed": True, "park_factors": True,
-            "team_stats": True, "age": True, "temporal": True,
+            "batting": True,
+            "statcast": True,
+            "non_contact": True,
+            "sprint_speed": True,
+            "bat_speed": True,
+            "park_factors": True,
+            "team_stats": True,
+            "age": True,
+            "temporal": True,
             "in_season": True,
         }
         names = set(get_feature_names(enabled))
         for name in IN_SEASON_FEATURE_NAMES:
             assert name in names
 
-    def test_default_behavior_unchanged_when_in_season_absent(self):
-        """Configs without in_season key must not change in_season status — but
-        the default for an unspecified group is True; this test only checks
-        that non-in_season groups are unaffected when we disable in_season."""
+    def test_in_season_absent_from_config_stays_off(self):
+        """IN_SEASON is opt-in: configs without the ``in_season`` key must
+        omit all 24 in-season features, preserving pre-Phase-2 behaviour for
+        the preseason MTL whose ``data.yaml`` never mentions the new group."""
         baseline = {
-            "batting": True, "statcast": True, "non_contact": True,
-            "sprint_speed": True, "bat_speed": True, "park_factors": True,
-            "team_stats": True, "age": True, "temporal": True,
+            "batting": True,
+            "statcast": True,
+            "non_contact": True,
+            "sprint_speed": True,
+            "bat_speed": True,
+            "park_factors": True,
+            "team_stats": True,
+            "age": True,
+            "temporal": True,
         }
-        names_baseline = set(get_feature_names({**baseline, "in_season": False}))
         names_without_key = set(get_feature_names(baseline))
-        # Toggling in_season off must exactly equal the set produced when the
-        # key is absent iff the default is False; or if the default is True the
-        # sets differ by the in_season features. Either way, the pre-existing
-        # feature set (batting, temporal, etc.) must not lose any member.
-        assert {n for n in names_baseline if not n.startswith(("trail4w_", "pa_ytd", "obp_ytd", "slg_ytd", "hr_per_pa_ytd", "r_per_pa_ytd", "rbi_per_pa_ytd", "sb_per_pa_ytd", "iso_ytd", "bb_rate_ytd", "k_rate_ytd", "week_index", "pa_fraction", "days_on_il_ytd", "has_il_data"))}.issubset(names_without_key)
+        # Exactly zero in-season features leak in when the key is absent.
+        for name in IN_SEASON_FEATURE_NAMES:
+            assert name not in names_without_key, (
+                f"{name} leaked in despite in_season being absent from config"
+            )
+
+    def test_in_season_absent_equals_explicit_off(self):
+        """Omitting the ``in_season`` key is identical to setting it False."""
+        baseline = {
+            "batting": True,
+            "statcast": True,
+            "non_contact": True,
+            "sprint_speed": True,
+            "bat_speed": True,
+            "park_factors": True,
+            "team_stats": True,
+            "age": True,
+            "temporal": True,
+        }
+        names_off = get_feature_names({**baseline, "in_season": False})
+        names_absent = get_feature_names(baseline)
+        assert names_off == names_absent
 
 
 # ---------------------------------------------------------------------------
@@ -264,11 +315,14 @@ class TestComputeSchema:
 
 
 class TestYtdPassthrough:
-
     def test_ytd_values_unchanged(self):
         row = _make_snapshot_row(
-            pa_ytd=250.0, obp_ytd=0.340, slg_ytd=0.450,
-            hr_per_pa_ytd=0.06, k_rate_ytd=0.25, iso_ytd=0.170,
+            pa_ytd=250.0,
+            obp_ytd=0.340,
+            slg_ytd=0.450,
+            hr_per_pa_ytd=0.06,
+            k_rate_ytd=0.25,
+            iso_ytd=0.170,
         )
         df = pd.DataFrame([row])
         out = compute_in_season_features(df)
@@ -325,33 +379,53 @@ class TestTrail4wRateDerivation:
 
     def test_trail4w_obp_derivation(self):
         """OBP = (H + BB + HBP) / (AB + BB + HBP + SF)."""
-        df = pd.DataFrame([_make_snapshot_row(
-            trail4w_pa=80.0,
-            trail4w_ab=68.0, trail4w_h=19.0,
-            trail4w_bb=8.0, trail4w_hbp=1.0, trail4w_sf=1.0,
-        )])
+        df = pd.DataFrame(
+            [
+                _make_snapshot_row(
+                    trail4w_pa=80.0,
+                    trail4w_ab=68.0,
+                    trail4w_h=19.0,
+                    trail4w_bb=8.0,
+                    trail4w_hbp=1.0,
+                    trail4w_sf=1.0,
+                )
+            ]
+        )
         out = compute_in_season_features(df)
         expected = (19.0 + 8.0 + 1.0) / (68.0 + 8.0 + 1.0 + 1.0)
         assert out["trail4w_obp"].iloc[0] == pytest.approx(expected)
 
     def test_trail4w_slg_derivation(self):
         """SLG = (1B + 2·2B + 3·3B + 4·HR) / AB."""
-        df = pd.DataFrame([_make_snapshot_row(
-            trail4w_ab=68.0,
-            trail4w_singles=12.0, trail4w_doubles=3.0,
-            trail4w_triples=0.0, trail4w_hr=4.0,
-        )])
+        df = pd.DataFrame(
+            [
+                _make_snapshot_row(
+                    trail4w_ab=68.0,
+                    trail4w_singles=12.0,
+                    trail4w_doubles=3.0,
+                    trail4w_triples=0.0,
+                    trail4w_hr=4.0,
+                )
+            ]
+        )
         out = compute_in_season_features(df)
         expected = (12.0 + 2 * 3.0 + 3 * 0.0 + 4 * 4.0) / 68.0
         assert out["trail4w_slg"].iloc[0] == pytest.approx(expected)
 
     def test_trail4w_iso_derivation(self):
         """ISO = SLG - AVG."""
-        df = pd.DataFrame([_make_snapshot_row(
-            trail4w_ab=68.0, trail4w_h=19.0,
-            trail4w_singles=12.0, trail4w_doubles=3.0,
-            trail4w_triples=0.0, trail4w_hr=4.0,
-        )])
+        df = pd.DataFrame(
+            [
+                _make_snapshot_row(
+                    trail4w_ab=68.0,
+                    trail4w_h=19.0,
+                    trail4w_singles=12.0,
+                    trail4w_doubles=3.0,
+                    trail4w_triples=0.0,
+                    trail4w_hr=4.0,
+                )
+            ]
+        )
         out = compute_in_season_features(df)
         slg = (12.0 + 2 * 3.0 + 3 * 0.0 + 4 * 4.0) / 68.0
         avg = 19.0 / 68.0
@@ -359,10 +433,17 @@ class TestTrail4wRateDerivation:
 
     def test_trail4w_division_by_zero_gives_nan(self):
         """trail4w_pa == 0 must yield NaN per-PA rates, not inf or raise."""
-        df = pd.DataFrame([_make_snapshot_row(
-            trail4w_pa=0.0, trail4w_hr=0.0, trail4w_ab=0.0,
-            trail4w_bb=0.0, trail4w_so=0.0,
-        )])
+        df = pd.DataFrame(
+            [
+                _make_snapshot_row(
+                    trail4w_pa=0.0,
+                    trail4w_hr=0.0,
+                    trail4w_ab=0.0,
+                    trail4w_bb=0.0,
+                    trail4w_so=0.0,
+                )
+            ]
+        )
         out = compute_in_season_features(df)
         assert np.isnan(out["trail4w_hr_per_pa"].iloc[0])
         assert np.isnan(out["trail4w_bb_rate"].iloc[0])
@@ -379,6 +460,31 @@ class TestTrail4wRatePassthrough:
         out = compute_in_season_features(df)
         assert out["trail4w_obp"].iloc[0] == pytest.approx(0.350)
 
+    def test_existing_trail4w_slg_passthrough(self):
+        """Pre-computed trail4w_slg wins over the derived formula."""
+        row = _make_snapshot_row()
+        row["trail4w_slg"] = 0.501
+        df = pd.DataFrame([row])
+        out = compute_in_season_features(df)
+        assert out["trail4w_slg"].iloc[0] == pytest.approx(0.501)
+
+    def test_existing_trail4w_iso_passthrough(self):
+        """Pre-computed trail4w_iso bypasses SLG - AVG derivation."""
+        row = _make_snapshot_row()
+        row["trail4w_iso"] = 0.199
+        df = pd.DataFrame([row])
+        out = compute_in_season_features(df)
+        assert out["trail4w_iso"].iloc[0] == pytest.approx(0.199)
+
+    def test_existing_trail4w_per_pa_rate_passthrough(self):
+        """Pre-computed trail4w per-PA rate columns bypass the counts."""
+        row = _make_snapshot_row(trail4w_pa=80.0, trail4w_hr=4.0)
+        # Set a value distinct from the derived 4/80 = 0.05
+        row["trail4w_hr_per_pa"] = 0.123
+        df = pd.DataFrame([row])
+        out = compute_in_season_features(df)
+        assert out["trail4w_hr_per_pa"].iloc[0] == pytest.approx(0.123)
+
 
 # ---------------------------------------------------------------------------
 # Derived timing features
@@ -386,7 +492,6 @@ class TestTrail4wRatePassthrough:
 
 
 class TestWeekIndex:
-
     def test_week_index_zero_for_first_week(self):
         """Earliest week of each (mlbam_id, season) has week_index=0."""
         rows = [
@@ -430,7 +535,6 @@ class TestWeekIndex:
 
 
 class TestPaFraction:
-
     def test_pa_fraction_uses_650_denominator(self):
         df = pd.DataFrame([_make_snapshot_row(pa_ytd=325.0)])
         out = compute_in_season_features(df)
@@ -457,7 +561,6 @@ class TestPaFraction:
 
 
 class TestIlStubs:
-
     def test_days_on_il_ytd_is_zero(self):
         df = pd.DataFrame([_make_snapshot_row() for _ in range(3)])
         out = compute_in_season_features(df)
@@ -491,10 +594,15 @@ class TestMissingData:
             "iso_year": 2024,
             "iso_week": 15,
             "pa_ytd": 200.0,
-            "obp_ytd": 0.340, "slg_ytd": 0.440,
-            "hr_per_pa_ytd": 0.05, "r_per_pa_ytd": 0.15,
-            "rbi_per_pa_ytd": 0.14, "sb_per_pa_ytd": 0.02,
-            "iso_ytd": 0.15, "bb_rate_ytd": 0.08, "k_rate_ytd": 0.22,
+            "obp_ytd": 0.340,
+            "slg_ytd": 0.440,
+            "hr_per_pa_ytd": 0.05,
+            "r_per_pa_ytd": 0.15,
+            "rbi_per_pa_ytd": 0.14,
+            "sb_per_pa_ytd": 0.02,
+            "iso_ytd": 0.15,
+            "bb_rate_ytd": 0.08,
+            "k_rate_ytd": 0.22,
             # no trail4w columns at all
         }
         df = pd.DataFrame([minimal_row])
