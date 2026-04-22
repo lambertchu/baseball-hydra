@@ -98,6 +98,14 @@ def compute_sample_weights(
 class ROSSnapshotDataset(Dataset):
     """Per-cutoff dataset of (features, rate targets, PA target, weight).
 
+    .. note::
+        Not currently wired into :func:`src.models.mtl_ros.train.train_ros`;
+        the production training path hands raw numpy arrays directly to
+        :class:`src.models.mtl_ros.model.MTLQuantileEnsembleForecaster`,
+        which owns its own internal dataset wrapper.  This class is kept as
+        a building block for future custom loaders (e.g. streaming weekly
+        snapshots off-disk or coupling cutoff selection to training).
+
     Parameters
     ----------
     snapshots:

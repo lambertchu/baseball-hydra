@@ -6,9 +6,16 @@ Wires together the Phase 2 building blocks:
   feature columns derived from weekly snapshot rows.
 * :func:`src.features.registry.get_feature_names` — canonical preseason
   feature names we optionally concatenate onto the snapshot frame.
-* :class:`src.models.mtl_ros.dataset.ROSSnapshotDataset` is built implicitly
-  through :func:`compute_sample_weights`; the forecaster itself already owns
-  the DataLoader wiring internally so we only feed it raw arrays.
+* :func:`src.models.mtl_ros.dataset.compute_sample_weights` — recency ×
+  ``sqrt(ros_pa + 1)`` per-row weights; passed into the forecaster as a
+  plain numpy array.  Training hands raw numpy arrays (features, rate
+  targets, PA target, sample weights) directly to
+  :class:`src.models.mtl_ros.model.MTLQuantileEnsembleForecaster`, which
+  wraps them internally via its own ``_QuantileDataset``.
+  :class:`src.models.mtl_ros.dataset.ROSSnapshotDataset` is a building
+  block reserved for future custom loaders (e.g. streaming weekly
+  snapshots off-disk) and is **not** currently wired through
+  :func:`train_ros`.
 * :class:`src.models.mtl_ros.splits.walk_forward_split` — season-boundary
   train/val/test split.
 * :class:`src.models.mtl_ros.model.MTLQuantileEnsembleForecaster` — the

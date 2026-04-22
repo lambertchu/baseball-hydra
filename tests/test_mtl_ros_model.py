@@ -243,6 +243,27 @@ class TestMTLQuantileForecaster:
         with pytest.raises(RuntimeError):
             model.predict(pd.DataFrame(np.zeros((3, 5))))
 
+    def test_forecaster_predict_returns_monotonic_quantiles(self):
+        """Every (row, target) quantile vector must be sorted along tau.
+
+        Pinball-loss training on a tiny backbone does not guarantee
+        tau-ordered outputs on unseen rows, so ``predict`` enforces
+        monotonicity before returning. Regression guard: without the
+        post-hoc sort we empirically see hundreds of negative per-tau
+        diffs on this synthetic smoke model.
+        """
+        X, y, pa_target = _make_training_data(n_samples=40)
+        cfg = _make_small_config(epochs=2)
+        model = MTLQuantileForecaster(cfg)
+        model.fit(X, y, pa_target=pa_target)
+
+        preds = model.predict(X)
+        diffs = np.diff(preds["quantiles"], axis=-1)
+        # All per-tau gaps must be >= 0 (non-decreasing across tau).
+        assert np.all(diffs >= 0), (
+            f"Quantile crossings detected: min diff = {diffs.min()}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestMTLQuantileEnsembleForecaster
@@ -270,14 +291,18 @@ class TestMTLQuantileEnsembleForecaster:
         cfg = _make_small_config(epochs=1)
         ens = MTLQuantileEnsembleForecaster(cfg)
 
+        # Use tau-sorted member arrays so the ensemble-side sort is a no-op
+        # here. Monotonicity under member disagreement is covered by the
+        # dedicated test below.
+        tau_row = np.array([0.2, 0.4, 0.5, 0.6, 0.8])
         member_a = MagicMock()
         member_a.predict.return_value = {
-            "quantiles": np.ones((3, 6, 5)) * 2.0,
+            "quantiles": np.broadcast_to(tau_row, (3, 6, 5)) * 2.0,
             "pa_remaining": np.ones((3, 1)) * 100.0,
         }
         member_b = MagicMock()
         member_b.predict.return_value = {
-            "quantiles": np.ones((3, 6, 5)) * 4.0,
+            "quantiles": np.broadcast_to(tau_row, (3, 6, 5)) * 4.0,
             "pa_remaining": np.ones((3, 1)) * 200.0,
         }
         ens.forecasters_ = [member_a, member_b]
@@ -294,9 +319,57 @@ class TestMTLQuantileEnsembleForecaster:
 
         X = pd.DataFrame(np.zeros((3, 5)))
         preds = ens.predict(X)
-        # Mean of 2 and 4 is 3 — per-quantile, per-task, per-row.
-        np.testing.assert_allclose(preds["quantiles"], np.ones((3, 6, 5)) * 3.0)
+        # Mean of 2*tau_row and 4*tau_row is 3*tau_row — per-quantile, per-task, per-row.
+        np.testing.assert_allclose(
+            preds["quantiles"],
+            np.broadcast_to(tau_row * 3.0, (3, 6, 5)),
+        )
         np.testing.assert_allclose(preds["pa_remaining"], np.ones((3, 1)) * 150.0)
+
+    def test_ensemble_predict_returns_monotonic_quantiles(self):
+        """Ensemble sort fixes crossings introduced by member disagreement.
+
+        Two stub members emit tau-sorted arrays, but they disagree on the
+        per-tau ranking so the element-wise mean is NOT sorted. The
+        ensemble's predict() must return a sorted result anyway.
+        """
+        cfg = _make_small_config(epochs=1)
+        ens = MTLQuantileEnsembleForecaster(cfg)
+
+        # Both members emit individually-sorted quantiles but with opposite
+        # tails: averaging produces a crossing at the middle.
+        member_a = MagicMock()
+        member_a.predict.return_value = {
+            "quantiles": np.broadcast_to(
+                np.array([0.1, 0.2, 0.3, 0.9, 1.0]), (2, 6, 5)
+            ).copy(),
+            "pa_remaining": np.zeros((2, 1)),
+        }
+        member_b = MagicMock()
+        member_b.predict.return_value = {
+            "quantiles": np.broadcast_to(
+                np.array([0.0, 0.05, 0.8, 0.85, 0.9]), (2, 6, 5)
+            ).copy(),
+            "pa_remaining": np.zeros((2, 1)),
+        }
+        # Unsorted mean would be [0.05, 0.125, 0.55, 0.875, 0.95] — already
+        # sorted. Craft a crossing by making member_b's q_0.75 < q_0.50 after
+        # averaging: swap member_b's 2nd and 3rd entries.
+        member_b.predict.return_value["quantiles"] = np.broadcast_to(
+            np.array([0.0, 0.8, 0.05, 0.85, 0.9]), (2, 6, 5)
+        ).copy()
+        # Mean: [0.05, 0.5, 0.175, 0.875, 0.95] — crosses between idx 1 and 2.
+        ens.forecasters_ = [member_a, member_b]
+        ens.is_fitted_ = True
+        ens.feature_names_ = [f"f{i}" for i in range(5)]
+        ens.target_names_ = ["t"] * 6
+
+        X = pd.DataFrame(np.zeros((2, 5)))
+        preds = ens.predict(X)
+        diffs = np.diff(preds["quantiles"], axis=-1)
+        assert np.all(diffs >= 0), (
+            f"Ensemble quantile crossings detected: min diff = {diffs.min()}"
+        )
 
     def test_save_load_roundtrip(self, tmp_path):
         X, y, pa_target = _make_training_data(n_samples=20)

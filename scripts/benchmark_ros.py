@@ -364,22 +364,19 @@ def _phase2_feature_matrix(
 
     # Reindex to the ensemble's trained feature order; fill anything missing
     # with 0.0 (the predict path also replaces NaN with 0 inside the
-    # forecaster's scale-and-clamp step, so this is defensive).
+    # forecaster's scale-and-clamp step, so this is defensive). Log a warning
+    # mirroring the training-time warning so silent drift surfaces in logs.
+    missing = [name for name in feature_names if name not in enriched.columns]
+    if missing:
+        sample = sorted(missing)[:10]
+        logger.warning(
+            "phase2 predict: %d features filled with 0.0: %s%s",
+            len(missing),
+            sample,
+            "..." if len(missing) > len(sample) else "",
+        )
     X = enriched.reindex(columns=feature_names).astype(float).fillna(0.0)
     return X
-
-
-def _sort_quantiles(q_arr: np.ndarray) -> np.ndarray:
-    """Sort each (row, target) quantile vector ascending.
-
-    Ensemble averaging can introduce tiny quantile crossings — a row where
-    q_{0.25} ends up marginally above q_{0.50}. Post-hoc sorting along the
-    quantile axis removes the crossing without changing the marginal
-    distribution's mean rank.
-    """
-    if q_arr.ndim != 3:
-        raise ValueError(f"expected (n, T, Q), got {q_arr.shape}")
-    return np.sort(q_arr, axis=-1)
 
 
 def predict_phase2(
@@ -392,16 +389,16 @@ def predict_phase2(
 
     ``point_df`` is indexed by ``ROS_RATE_TARGETS`` and holds the median
     (tau=0.50) for each (row, target) — the apples-to-apples RMSE
-    representative. ``quantiles_array`` is the full sorted ``(n_rows, 6,
-    n_taus)`` tensor used for pinball loss + PIT.
+    representative. ``quantiles_array`` is the full ``(n_rows, 6, n_taus)``
+    tensor used for pinball loss + PIT. The ensemble already enforces
+    tau-monotonicity inside ``predict``, so no extra sort is needed here.
     """
     X = _phase2_feature_matrix(rows, ensemble, phase2_config, preseason)
     if X is None or len(X) == 0:
         return None
 
     preds = ensemble.predict(X)
-    q_raw: np.ndarray = np.asarray(preds["quantiles"], dtype=np.float64)
-    q_sorted = _sort_quantiles(q_raw)
+    q_arr: np.ndarray = np.asarray(preds["quantiles"], dtype=np.float64)
 
     # Median slice — prefer the exact 0.5 index when present, fall back to the
     # middle quantile (matches the network's ``median_index`` convention).
@@ -409,12 +406,12 @@ def predict_phase2(
     try:
         median_idx = taus.index(0.5)
     except ValueError:
-        median_idx = q_sorted.shape[-1] // 2
+        median_idx = q_arr.shape[-1] // 2
 
-    median = q_sorted[:, :, median_idx]
+    median = q_arr[:, :, median_idx]
     point_df = pd.DataFrame(median, columns=list(ROS_RATE_TARGETS))
     point_df.index = rows.index
-    return point_df, q_sorted
+    return point_df, q_arr
 
 
 # ---------------------------------------------------------------------------

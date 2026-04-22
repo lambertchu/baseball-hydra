@@ -713,6 +713,13 @@ class MTLQuantileForecaster:
         mean = self.target_scaler_.mean_.reshape(1, -1, 1)
         q_original = q_scaled * scale + mean
 
+        # Enforce monotonicity across the tau axis. Pinball-loss training does
+        # not guarantee tau-ordered outputs on unseen rows, so sort the last
+        # axis before handing predictions to callers. StandardScaler is affine
+        # with positive scale so sorting post-inverse-transform is equivalent
+        # to sorting pre-inverse-transform.
+        q_original = np.sort(q_original, axis=-1)
+
         return {"quantiles": q_original, "pa_remaining": pa_pred}
 
     # ------------------------------------------------------------------
@@ -921,8 +928,14 @@ class MTLQuantileEnsembleForecaster:
         # Per-quantile mean: (n_members, n_rows, n_targets, n_quantiles) → mean over 0.
         quantiles_stack = np.stack([p["quantiles"] for p in preds], axis=0)
         pa_stack = np.stack([p["pa_remaining"] for p in preds], axis=0)
+        quantiles_mean = quantiles_stack.mean(axis=0)
+        # Each member already returns tau-sorted quantiles, but averaging can
+        # reintroduce tiny crossings when members disagree on ordering. Sort
+        # again post-aggregation so downstream callers always see monotonic
+        # quantiles.
+        quantiles_mean = np.sort(quantiles_mean, axis=-1)
         return {
-            "quantiles": quantiles_stack.mean(axis=0),
+            "quantiles": quantiles_mean,
             "pa_remaining": pa_stack.mean(axis=0),
         }
 

@@ -393,20 +393,3 @@ class TestBenchmarkSmokeWithSyntheticPhase2:
         assert ensemble is not None
         # Cache dir should contain a year_{2024} checkpoint directory.
         assert (cache_dir / "year_2024").exists()
-
-
-# ---------------------------------------------------------------------------
-# Sort helper
-# ---------------------------------------------------------------------------
-
-
-class TestSortQuantiles:
-    def test_sort_quantiles_enforces_monotonicity(self):
-        # Intentionally out-of-order slice (q_0.25 > q_0.50) should be sorted.
-        q = np.array([[[0.3, 0.5, 0.4, 0.6, 0.7]]])  # shape (1, 1, 5)
-        sorted_q = br._sort_quantiles(q)
-        np.testing.assert_array_equal(sorted_q[0, 0], [0.3, 0.4, 0.5, 0.6, 0.7])
-
-    def test_sort_quantiles_requires_3d(self):
-        with pytest.raises(ValueError, match="expected"):
-            br._sort_quantiles(np.zeros((3, 5)))
