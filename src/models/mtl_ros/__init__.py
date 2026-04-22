@@ -18,10 +18,12 @@ from src.models.mtl_ros.model import (
     MTLQuantileForecaster,
     MTLQuantileNetwork,
 )
+from src.models.mtl_ros.train import train_ros
 
 __all__ = [
     "MultiTaskQuantileLoss",
     "MTLQuantileNetwork",
     "MTLQuantileForecaster",
     "MTLQuantileEnsembleForecaster",
+    "train_ros",
 ]
