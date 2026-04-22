@@ -21,6 +21,7 @@ class FeatureGroup(str, Enum):
     TEAM_STATS = "team_stats"
     AGE = "age"
     TEMPORAL = "temporal"
+    IN_SEASON = "in_season"
 
 
 class FeatureType(str, Enum):
@@ -241,6 +242,45 @@ def _build_temporal_features() -> list[FeatureMeta]:
 TEMPORAL_FEATURES: list[FeatureMeta] = _build_temporal_features()
 
 # ---------------------------------------------------------------------------
+# In-season features (Phase 2: weekly-snapshot inputs for ROS MTL)
+# ---------------------------------------------------------------------------
+# Consumed by ``src.features.in_season.compute_in_season_features`` which
+# reads weekly snapshot rows (see ``src.data.build_snapshots``) and returns
+# a DataFrame with these 24 columns alongside the preseason feature matrix.
+# The preseason MTL in ``src/models/mtl/`` never sees these features.
+IN_SEASON_FEATURES: list[FeatureMeta] = [
+    # YTD passthroughs (10) — already present on the weekly snapshot row.
+    FeatureMeta("pa_ytd", FeatureGroup.IN_SEASON, FeatureType.COUNT, "Plate appearances to date this season"),
+    FeatureMeta("obp_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "On-base percentage to date this season"),
+    FeatureMeta("slg_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Slugging percentage to date this season"),
+    FeatureMeta("hr_per_pa_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Home runs per PA to date this season"),
+    FeatureMeta("r_per_pa_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Runs per PA to date this season"),
+    FeatureMeta("rbi_per_pa_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "RBI per PA to date this season"),
+    FeatureMeta("sb_per_pa_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Stolen bases per PA to date this season"),
+    FeatureMeta("iso_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Isolated power to date this season"),
+    FeatureMeta("bb_rate_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Walk rate to date this season"),
+    FeatureMeta("k_rate_ytd", FeatureGroup.IN_SEASON, FeatureType.RATE, "Strikeout rate to date this season"),
+    # Trailing-4-week rates (10) — derived from trail4w_* count columns when
+    # rate columns aren't pre-computed on the snapshot.
+    FeatureMeta("trail4w_pa", FeatureGroup.IN_SEASON, FeatureType.COUNT, "Plate appearances in trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_obp", FeatureGroup.IN_SEASON, FeatureType.RATE, "On-base percentage over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_slg", FeatureGroup.IN_SEASON, FeatureType.RATE, "Slugging percentage over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_hr_per_pa", FeatureGroup.IN_SEASON, FeatureType.RATE, "Home runs per PA over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_r_per_pa", FeatureGroup.IN_SEASON, FeatureType.RATE, "Runs per PA over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_rbi_per_pa", FeatureGroup.IN_SEASON, FeatureType.RATE, "RBI per PA over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_sb_per_pa", FeatureGroup.IN_SEASON, FeatureType.RATE, "Stolen bases per PA over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_iso", FeatureGroup.IN_SEASON, FeatureType.RATE, "Isolated power over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_bb_rate", FeatureGroup.IN_SEASON, FeatureType.RATE, "Walk rate over trailing 4 ISO weeks"),
+    FeatureMeta("trail4w_k_rate", FeatureGroup.IN_SEASON, FeatureType.RATE, "Strikeout rate over trailing 4 ISO weeks"),
+    # Derived timing (2) — computed from (mlbam_id, season, iso_week) and pa_ytd.
+    FeatureMeta("week_index", FeatureGroup.IN_SEASON, FeatureType.CONTINUOUS, "0-indexed ISO week within the (player, season)"),
+    FeatureMeta("pa_fraction", FeatureGroup.IN_SEASON, FeatureType.CONTINUOUS, "pa_ytd divided by a constant expected full-season PA (650)"),
+    # IL stubs (2) — constants until an external IL feed is wired in.
+    FeatureMeta("days_on_il_ytd", FeatureGroup.IN_SEASON, FeatureType.COUNT, "Days on the injured list to date (stub: always 0 until IL source wired)"),
+    FeatureMeta("has_il_data", FeatureGroup.IN_SEASON, FeatureType.INDICATOR, "Whether real IL data is available (stub: always 0 until IL source wired)"),
+]
+
+# ---------------------------------------------------------------------------
 # Combined registry
 # ---------------------------------------------------------------------------
 ALL_FEATURES: list[FeatureMeta] = (
@@ -253,6 +293,7 @@ ALL_FEATURES: list[FeatureMeta] = (
     + PARK_FACTOR_FEATURES
     + TEAM_STAT_FEATURES
     + TEMPORAL_FEATURES
+    + IN_SEASON_FEATURES
 )
 
 # Target columns (fixed order — do not reorder)
@@ -275,7 +316,13 @@ _GROUP_MAP: dict[FeatureGroup, list[FeatureMeta]] = {
     FeatureGroup.PARK_FACTORS: PARK_FACTOR_FEATURES,
     FeatureGroup.TEAM_STATS: TEAM_STAT_FEATURES,
     FeatureGroup.TEMPORAL: TEMPORAL_FEATURES,
+    FeatureGroup.IN_SEASON: IN_SEASON_FEATURES,
 }
+
+# Groups that must be opted into explicitly. Leaving these off by default
+# ensures the preseason MTL (whose ``configs/data.yaml`` never mentions
+# ``in_season``) keeps its pre-Phase-2 feature set unchanged.
+_OPT_IN_GROUPS: frozenset[FeatureGroup] = frozenset({FeatureGroup.IN_SEASON})
 
 
 def get_feature_names(
@@ -287,7 +334,9 @@ def get_feature_names(
     ----------
     enabled_groups:
         Mapping of group name → enabled flag (from ``configs/data.yaml``
-        ``feature_groups`` section). If None, all groups are enabled.
+        ``feature_groups`` section). If None, all default-on groups are
+        enabled; opt-in groups like ``IN_SEASON`` remain off until set
+        explicitly.
 
     Returns
     -------
@@ -296,7 +345,9 @@ def get_feature_names(
     """
     names: list[str] = []
     for group, features in _GROUP_MAP.items():
-        if enabled_groups is None or enabled_groups.get(group.value, True):
+        default = group not in _OPT_IN_GROUPS
+        enabled = default if enabled_groups is None else enabled_groups.get(group.value, default)
+        if enabled:
             names.extend(f.name for f in features)
     return names
 

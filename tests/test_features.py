@@ -703,10 +703,19 @@ class TestFeatureRegistry:
             assert f"weighted_avg_{stat}" in temporal_names
             assert f"trend_{stat}" in temporal_names
 
-    def test_get_feature_names_returns_all_when_no_filter(self):
-        """get_feature_names with no filter returns all features."""
+    def test_get_feature_names_returns_all_default_on_groups_when_no_filter(self):
+        """get_feature_names with no filter returns every default-on feature.
+
+        Opt-in groups (``in_season`` as of Phase 2) are excluded until
+        explicitly toggled on to keep the preseason MTL's feature matrix
+        unchanged when its config omits the key.
+        """
         all_names = get_feature_names()
-        assert len(all_names) == len(ALL_FEATURES)
+        from src.features.registry import FeatureGroup, IN_SEASON_FEATURES
+        non_optin = [f for f in ALL_FEATURES if f.group != FeatureGroup.IN_SEASON]
+        assert len(all_names) == len(non_optin)
+        for f in IN_SEASON_FEATURES:
+            assert f.name not in all_names
 
     def test_get_feature_names_respects_disabled_groups(self):
         """Disabling a group excludes its features."""
