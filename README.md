@@ -61,7 +61,7 @@ uv run python -m src.data.build_snapshots --seasons 2016-2026   # Weekly snapsho
 # Step 8 (optional): ROS benchmark at PA checkpoints (50 / 100 / 200 / 400)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025                           # persist_observed baseline (no retraining)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                 # + frozen_preseason, marcel_blend, shrinkage (retrains MTL per year)
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau       # fit per-stat τ₀ before scoring
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau       # fit per-stat τ₀ via leave-one-year-out cross-fitting
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -74,6 +74,7 @@ the naive persistence baseline (Y+1 = Y).
 - **Statcast raw BBE**: pitch-level batted-ball events cached as `statcast_raw_{year}.parquet` (via pybaseball)
 - **Statcast aggregated**: per-batter metrics aggregated from local raw files (API fallback if raw missing)
 - **Baseball Savant**: sprint speed (2016+), bat speed (2024+)
+- **Baseball Reference**: per-(batter, ISO-week) batting logs for in-season ROS snapshots (via pybaseball)
 - **Team stats**: team offensive environment for lineup context
 - **Public projections**: Steamer, ZiPS, The Bat, The Bat X (comparison only, not used in training). Current-year projections can be fetched via the FanGraphs API. Historical projections must be downloaded manually from [FanGraphs Projections](https://www.fangraphs.com/projections) and require a paid FanGraphs membership.
 

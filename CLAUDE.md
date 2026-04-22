@@ -249,7 +249,7 @@ Every evaluation run must be compared against the **naive persistence** baseline
 
 ## 7) Current Implementation Status
 
-Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. An in-season data layer (weekly snapshots) and ROS evaluation harness are in place as the foundation for the rest-of-season projector — no in-season model consumes them yet.
+Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. **ROS Phase 1 is complete**: weekly snapshot data layer, ROS evaluation harness, and a closed-form Bayesian shrinkage baseline that blends the preseason MTL prior with observed year-to-date counts. Phase 2 (augmented MTL with in-season features + quantile heads) is the next milestone and has not started.
 
 ### 7.1 What Was Built
 
@@ -264,7 +264,7 @@ Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, M
 | **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
 | **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`) | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns. Raw Statcast retains `game_date`. Data layer only — not yet consumed by any model. |
 | **ROS Evaluation Harness** | `src/eval/ros_metrics.py`, `scripts/benchmark_ros.py` | Pinball loss, PIT coverage, PA-checkpoint row selection, plus a rolling ROS benchmark at 50/100/200/400 PA checkpoints. |
-| **ROS Baselines**          | `src/models/baselines/shrinkage.py`                         | Four ROS baselines available via the benchmark: `persist_observed`, `frozen_preseason`, `marcel_blend`, and `shrinkage` — a closed-form Beta-Binomial posterior with per-stat pseudocount τ₀ (stabilisation-based defaults, optionally fit via `fit_tau_per_stat`). |
+| **ROS Baselines**          | `src/models/baselines/shrinkage.py`                         | Four ROS baselines available via the benchmark: `persist_observed`, `frozen_preseason`, `marcel_blend`, and `shrinkage` — a closed-form Beta-Binomial posterior with per-stat pseudocount τ₀ (stabilisation-based defaults, optionally fit via `fit_tau_per_stat` using leave-one-year-out cross-fitting across the eval years to prevent leakage). |
 
 ### 7.2 Current Reporting Outputs
 
@@ -313,7 +313,7 @@ uv run python -m src.data.build_snapshots --seasons 2016-2026            # Merge
 # ROS benchmark (PA checkpoints 50/100/200/400)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025                             # persist_observed only (no retraining)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                   # + frozen_preseason, marcel_blend, shrinkage (retrains MTL per year)
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau         # fit per-stat τ₀ on held-out checkpoint rows before scoring
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau         # fit per-stat τ₀ via leave-one-year-out cross-fitting (needs >= 2 eval years)
 
 # Training
 uv run python -m src.models.mtl.train --config configs/mtl.yaml              # MTL holdout
