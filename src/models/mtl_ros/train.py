@@ -327,22 +327,26 @@ def train_ros(
     splits = split_cfg.build(joined)
     train_frame = splits["train"]
     val_frame = splits.get("val")
+
+    # Drop NaN ROS-target rows BEFORE the empty check so a frame that
+    # loses all rows to NaN targets fails with a clear error instead of
+    # passing an empty array into StandardScaler.fit_transform downstream.
+    # The loss currently averages over all rows rather than masking NaNs,
+    # so leaving them in would poison every gradient step.
+    train_frame = _drop_rows_with_nan_targets(train_frame, ROS_RATE_TARGETS)
+    if val_frame is not None:
+        val_frame = _drop_rows_with_nan_targets(val_frame, ROS_RATE_TARGETS)
+
     if len(train_frame) == 0:
         raise ValueError(
-            "Train split is empty; check splits.train_end_season and that "
-            "snapshots cover that range."
+            "No usable training rows after filtering; check min_ytd_pa, "
+            "snapshot coverage, or split boundaries."
         )
     logger.info(
         "Split sizes — train: %d, val: %s",
         len(train_frame),
         len(val_frame) if val_frame is not None else "(none)",
     )
-
-    # NaN ROS rate targets would otherwise produce NaN gradients — the loss
-    # averages over all rows rather than masking. Drop before materialising.
-    train_frame = _drop_rows_with_nan_targets(train_frame, ROS_RATE_TARGETS)
-    if val_frame is not None:
-        val_frame = _drop_rows_with_nan_targets(val_frame, ROS_RATE_TARGETS)
 
     X_train = train_frame[feature_cols]
     y_train = train_frame[list(ROS_RATE_TARGETS)]
@@ -550,7 +554,10 @@ def _make_smoke_fixtures() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
             "preseason_feature_groups": {
                 "age": True,
                 "park_factors": True,
-                "team_stats": True,
+                # Mirror the shipped config default — team_stats is
+                # end-of-season in merged_batter_data.parquet and leaks
+                # into mid-season rows.
+                "team_stats": False,
                 "temporal": True,
             },
             "include_in_season_features": True,

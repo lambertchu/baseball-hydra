@@ -198,6 +198,68 @@ class TestMTLQuantileForecaster:
         assert np.all(np.isfinite(preds["quantiles"]))
         assert np.all(np.isfinite(preds["pa_remaining"]))
 
+    def test_pa_target_is_scaled_in_training(self):
+        """PA target MUST be z-scored in training so the MSE loss sits on the
+        same scale as pinball rate losses. Raw PA magnitudes (~100-700)
+        would otherwise make pa_weight=1.0 dominate the combined loss.
+        """
+        X, y, pa_target = _make_training_data()
+        cfg = _make_small_config(epochs=2)
+        model = MTLQuantileForecaster(cfg)
+        model.fit(X, y, pa_target=pa_target)
+        assert model.pa_scaler_ is not None
+        # Scaler fitted on PA should recover the training distribution's
+        # mean within a reasonable tolerance.
+        assert np.isclose(model.pa_scaler_.mean_[0], pa_target.mean(), rtol=1e-5)
+        assert model.pa_scaler_.scale_[0] > 0
+
+    def test_pa_prediction_in_raw_units(self):
+        """After training on raw PA targets, ``predict`` must return PA
+        predictions back in the raw PA unit space (not z-scored).
+        """
+        X, y, pa_target = _make_training_data(n_samples=60)
+        cfg = _make_small_config(epochs=5)
+        model = MTLQuantileForecaster(cfg)
+        model.fit(X, y, pa_target=pa_target)
+
+        preds = model.predict(X)
+        pa_pred = preds["pa_remaining"].flatten()
+        # Should be in roughly the same magnitude as the training PA
+        # distribution — the model may not hit exact numbers but should
+        # land in the raw PA scale [50, 700] rather than z-space [-3, 3].
+        assert pa_pred.mean() > 50
+        assert pa_pred.mean() < 700
+
+    def test_drop_last_avoids_batchnorm_batch_of_1_crash(self):
+        """Training with ``len(dataset) % batch_size == 1`` must not crash
+        BatchNorm1d. The forecaster's DataLoader uses ``drop_last=True`` to
+        skip the tail-1 batch.
+        """
+        # 9 samples with batch_size=8 → last batch has 1 sample.
+        X, y, pa_target = _make_training_data(n_samples=9)
+        cfg = _make_small_config(epochs=2)
+        cfg["training"]["batch_size"] = 8
+        model = MTLQuantileForecaster(cfg)
+        # Previously this would raise: "Expected more than 1 value per channel
+        # when training, got input size torch.Size([1, N])".
+        model.fit(X, y, pa_target=pa_target)
+        assert model.is_fitted_
+
+    def test_device_config_threads_through(self):
+        """The model must honour ``training.device`` — network lives on the
+        configured device, predict works without errors.
+        """
+        X, y, pa_target = _make_training_data()
+        cfg = _make_small_config(epochs=2)
+        cfg["training"]["device"] = "cpu"
+        model = MTLQuantileForecaster(cfg)
+        model.fit(X, y, pa_target=pa_target)
+        # Network parameters should all live on the configured device.
+        param_devices = {str(p.device) for p in model.network_.parameters()}
+        assert param_devices == {"cpu"}
+        preds = model.predict(X)
+        assert np.all(np.isfinite(preds["quantiles"]))
+
     def test_fit_predict_with_eval_set(self):
         X, y, pa_target = _make_training_data(n_samples=40)
         X_val, y_val, pa_val = _make_training_data(n_samples=10, seed=7)

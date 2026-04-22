@@ -21,9 +21,12 @@ Design choices:
   scaler work in z-scored target space.  At predict-time we inverse-transform
   each quantile slice independently (``StandardScaler`` is affine, so the
   quantile order is preserved).
-* **PA target is NOT scaled**.  The PA-remaining head predicts raw PA units,
-  which keeps the MSE loss interpretable in PA² and avoids an extra scaler
-  in the serialisation path.
+* **PA target IS scaled** (StandardScaler, stored as ``pa_scaler_``).  The
+  PA-remaining head is trained in z-scored PA space so the MSE loss sits
+  near O(1) alongside the pinball-scale rate losses; without this,
+  ``pa_weight=1.0`` would dominate the total loss by ~6 orders of magnitude
+  and drown out the quantile heads.  At predict-time PA is inverse-scaled
+  back to raw PA units.
 * **OOD clamp**: identical to preseason — scale inputs to training stats,
   clip to the per-feature train min/max before feeding the network.
 
@@ -341,6 +344,7 @@ class MTLQuantileForecaster:
         self.weight_decay: float = train_cfg.get("weight_decay", 1e-4)
         self.early_stopping_patience: int = train_cfg.get("early_stopping_patience", 20)
         self.recency_decay_lambda: float = train_cfg.get("recency_decay_lambda", 0.0)
+        self.device_: str = str(train_cfg.get("device", "cpu"))
         self.seed: int = config.get("seed", 42)
 
         # LR scheduler
@@ -361,6 +365,10 @@ class MTLQuantileForecaster:
         self.loss_fn_: MultiTaskQuantileLoss | None = None
         self.feature_scaler_: StandardScaler | None = None
         self.target_scaler_: StandardScaler | None = None
+        # PA target scaler — kept separate from ``target_scaler_`` because PA
+        # is scalar and needs its own affine transform for inverse-scaling
+        # inside ``predict()``.
+        self.pa_scaler_: StandardScaler | None = None
         self.feature_names_: list[str] = []
         self.target_names_: list[str] = []
         self.is_fitted_: bool = False
@@ -488,9 +496,16 @@ class MTLQuantileForecaster:
         self.feature_min_ = X_scaled.min(axis=0)
         self.feature_max_ = X_scaled.max(axis=0)
 
-        # Target scaling — rate targets only.  PA target stays in raw units.
+        # Target scaling — rate targets AND PA are both scaled into z-space
+        # so the losses sit on comparable magnitudes. Raw PA targets range
+        # ~0–700; raw MSE on those is O(10_000) while rate-target pinball loss
+        # is O(0.01), so an unscaled PA head with pa_weight=1.0 would drown
+        # out the quantile objective.
         self.target_scaler_ = StandardScaler()
         y_scaled = self.target_scaler_.fit_transform(y_arr)
+
+        self.pa_scaler_ = StandardScaler()
+        pa_scaled = self.pa_scaler_.fit_transform(pa_arr)
 
         # Sample weights: explicit > recency-from-season > none.
         sw: np.ndarray | None = None
@@ -502,15 +517,19 @@ class MTLQuantileForecaster:
             raw_weights = np.exp(-self.recency_decay_lambda * (max_season - season_arr))
             sw = raw_weights / raw_weights.mean()
 
-        # Training DataLoader
+        # Training DataLoader. ``drop_last=True`` avoids the "BatchNorm1d
+        # expects >1 value per channel" crash when the final batch has size 1
+        # (``len(dataset) % batch_size == 1``). Since we shuffle, losing at
+        # most one sample per epoch is negligible.
         gen = torch.Generator().manual_seed(self.seed)
-        train_ds = _QuantileDataset(X_scaled, y_scaled, pa_arr, sample_weights=sw)
+        train_ds = _QuantileDataset(X_scaled, y_scaled, pa_scaled, sample_weights=sw)
         self._use_sample_weights = train_ds.has_nontrivial_weights
         train_loader = DataLoader(
             train_ds,
             batch_size=self.batch_size,
             shuffle=True,
             generator=gen,
+            drop_last=True,
         )
 
         # Optional eval loader (uses a full-batch pass for speed).
@@ -523,10 +542,13 @@ class MTLQuantileForecaster:
                 y_val_arr = y_val_arr.reshape(-1, 1)
             X_val_scaled = self._scale_and_clamp(X_val_arr)
             y_val_scaled = self.target_scaler_.transform(y_val_arr)
-            val_ds = _QuantileDataset(X_val_scaled, y_val_scaled, pa_val_arr)
+            pa_val_scaled = self.pa_scaler_.transform(pa_val_arr)
+            val_ds = _QuantileDataset(X_val_scaled, y_val_scaled, pa_val_scaled)
             val_loader = DataLoader(val_ds, batch_size=len(val_ds))
 
-        # Network + loss
+        # Network + loss — moved to the configured device so batches can flow
+        # through without a per-step ``.cpu()`` detour.
+        device = torch.device(self.device_)
         self.network_ = MTLQuantileNetwork(
             n_features=n_features,
             n_targets=self.n_targets,
@@ -539,13 +561,13 @@ class MTLQuantileForecaster:
             speed_head_indices=self.speed_head_indices,
             speed_heads_receive_rates=self.speed_heads_receive_rates,
             taus=tuple(self.taus),
-        )
+        ).to(device)
         self.loss_fn_ = MultiTaskQuantileLoss(
             n_tasks=self.n_targets,
             taus=tuple(self.taus),
             pa_loss=self.pa_loss_type,
             pa_weight=self.pa_weight,
-        )
+        ).to(device)
 
         # Optimiser
         params = list(self.network_.parameters()) + list(self.loss_fn_.parameters())
@@ -618,10 +640,14 @@ class MTLQuantileForecaster:
         optimizer: torch.optim.Optimizer,
     ) -> float:
         self.network_.train()
+        device = next(self.network_.parameters()).device
         total_loss = 0.0
         n_batches = 0
         for X_batch, y_batch, pa_batch, w_batch in loader:
-            weights = w_batch if self._use_sample_weights else None
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+            pa_batch = pa_batch.to(device)
+            weights = w_batch.to(device) if self._use_sample_weights else None
             optimizer.zero_grad()
             outputs = self.network_(X_batch)
             loss, _ = self.loss_fn_(
@@ -646,8 +672,12 @@ class MTLQuantileForecaster:
         directly comparable.
         """
         self.network_.eval()
+        device = next(self.network_.parameters()).device
         losses: list[float] = []
         for X_batch, y_batch, pa_batch, _ in loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+            pa_batch = pa_batch.to(device)
             outputs = self.network_(X_batch)
             loss, _ = self.loss_fn_(
                 outputs["quantiles"],
@@ -666,7 +696,8 @@ class MTLQuantileForecaster:
         """Return predictions in ORIGINAL target scale.
 
         ``quantiles`` are inverse-scaled (mean + scale per target applied to
-        each quantile slice).  ``pa_remaining`` is already in raw PA units.
+        each quantile slice).  ``pa_remaining`` is inverse-scaled back into
+        raw PA units via ``pa_scaler_``.
         """
         if not self.is_fitted_:
             raise RuntimeError("Model has not been fitted. Call fit() first.")
@@ -675,11 +706,12 @@ class MTLQuantileForecaster:
         X_scaled = self._scale_and_clamp(X_arr)
 
         self.network_.eval()
+        device = next(self.network_.parameters()).device
         with torch.no_grad():
-            X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+            X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=device)
             outputs = self.network_(X_tensor)
             q_scaled = outputs["quantiles"].cpu().numpy()  # (n, T, Q)
-            pa_pred = outputs["pa_remaining"].cpu().numpy()  # (n, 1)
+            pa_scaled_pred = outputs["pa_remaining"].cpu().numpy()  # (n, 1)
 
         # Inverse-transform quantiles.  StandardScaler is affine:
         #   y_orig = y_scaled * scale + mean.
@@ -695,6 +727,9 @@ class MTLQuantileForecaster:
         # with positive scale so sorting post-inverse-transform is equivalent
         # to sorting pre-inverse-transform.
         q_original = np.sort(q_original, axis=-1)
+
+        # Inverse-transform PA back to raw PA units.
+        pa_pred = self.pa_scaler_.inverse_transform(pa_scaled_pred)
 
         return {"quantiles": q_original, "pa_remaining": pa_pred}
 
@@ -726,6 +761,10 @@ class MTLQuantileForecaster:
             "target_scaler_n_samples": torch.as_tensor(
                 self.target_scaler_.n_samples_seen_
             ),
+            "pa_scaler_mean": torch.from_numpy(self.pa_scaler_.mean_),
+            "pa_scaler_scale": torch.from_numpy(self.pa_scaler_.scale_),
+            "pa_scaler_var": torch.from_numpy(self.pa_scaler_.var_),
+            "pa_scaler_n_samples": torch.as_tensor(self.pa_scaler_.n_samples_seen_),
             "feature_names": self.feature_names_,
             "target_names": self.target_names_,
             "n_features": len(self.feature_names_),
@@ -777,6 +816,24 @@ class MTLQuantileForecaster:
             state["target_scaler_var"],
             state["target_scaler_n_samples"],
         )
+        # PA scaler was added for the loss-magnitude balance fix. Older
+        # checkpoints predate it; fall back to identity (mean=0, scale=1)
+        # which is mathematically a no-op on raw PA predictions.
+        if "pa_scaler_mean" in state:
+            instance.pa_scaler_ = reconstruct_scaler(
+                state["pa_scaler_mean"],
+                state["pa_scaler_scale"],
+                state["pa_scaler_var"],
+                state["pa_scaler_n_samples"],
+            )
+        else:
+            identity_pa = StandardScaler()
+            identity_pa.mean_ = np.zeros(1)
+            identity_pa.scale_ = np.ones(1)
+            identity_pa.var_ = np.ones(1)
+            identity_pa.n_samples_seen_ = 1
+            identity_pa.n_features_in_ = 1
+            instance.pa_scaler_ = identity_pa
 
         instance.n_targets = state["n_targets"]
         instance.n_quantiles = state["n_quantiles"]

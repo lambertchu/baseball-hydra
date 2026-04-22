@@ -566,6 +566,57 @@ class TestPhase2CacheMiss:
         assert br._phase2_eval_preseason_frame(2024, None) is None
 
 
+class TestPhase2FillWithTrainMean:
+    """Missing features at predict time must be filled with the training
+    feature mean, so after standardization they map to 0 (neutral) rather
+    than an extreme ``-mean/std`` value.
+    """
+
+    def test_fill_missing_with_train_mean(self):
+        # Stub ensemble whose first seed has a fitted scaler.
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        # 3 features — mean = [10.0, 20.0, 30.0]
+        arr = np.array(
+            [
+                [10.0, 20.0, 30.0],
+                [10.0, 20.0, 30.0],
+            ]
+        )
+        scaler.fit(arr)
+
+        # Build a minimal stub whose attrs match the predict-time
+        # contract: forecasters_[0] has feature_scaler_ and feature_names_.
+        class _StubForecaster:
+            def __init__(self) -> None:
+                self.feature_scaler_ = scaler
+                self.feature_names_ = ["a", "b", "c"]
+
+        class _StubEnsemble:
+            def __init__(self) -> None:
+                self.forecasters_ = [_StubForecaster()]
+
+        ensemble = _StubEnsemble()
+        X = pd.DataFrame({"a": [np.nan, 5.0], "b": [np.nan, 22.0], "c": [np.nan, 31.0]})
+        br._fill_with_train_mean(X, ensemble, ["a", "b", "c"])
+        # Row 0 should now carry the training means.
+        assert float(X.iloc[0]["a"]) == pytest.approx(10.0)
+        assert float(X.iloc[0]["b"]) == pytest.approx(20.0)
+        assert float(X.iloc[0]["c"]) == pytest.approx(30.0)
+        # Row 1 is unchanged.
+        assert float(X.iloc[1]["a"]) == pytest.approx(5.0)
+
+    def test_fill_falls_back_to_zero_without_scaler(self):
+        # No forecasters → no scaler; behavior matches legacy fillna(0).
+        class _Empty:
+            forecasters_ = []
+
+        X = pd.DataFrame({"a": [np.nan, 1.0]})
+        br._fill_with_train_mean(X, _Empty(), ["a"])
+        assert float(X.iloc[0]["a"]) == 0.0
+
+
 class TestMtlRosConfigDefaults:
     """The shipped configs/mtl_ros.yaml must not enable the leaky
     ``team_stats`` preseason group by default (end-of-season totals would

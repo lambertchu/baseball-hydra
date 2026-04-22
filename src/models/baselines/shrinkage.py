@@ -282,6 +282,7 @@ def shrinkage_posterior_quantiles(
     trials: pd.Series | np.ndarray,
     tau0: float,
     taus: Sequence[float] = DEFAULT_QUANTILE_TAUS,
+    success_scale: float = 1.0,
 ) -> pd.DataFrame:
     """Beta posterior quantiles for each row.
 
@@ -292,22 +293,33 @@ def shrinkage_posterior_quantiles(
     Parameters
     ----------
     preseason_rate:
-        Per-row preseason rate (prior mean). Will be cast to float.
+        Per-row preseason rate (prior mean). Will be cast to float. For
+        non-unit ``success_scale`` this should already be in the same
+        "per trial" units as ``successes / success_scale`` (e.g. for SLG
+        the prior is in [0, 1] — ``target_slg / 4``).
     successes, trials:
-        Observed counts from the weekly-snapshot schema.
+        Observed counts from the weekly-snapshot schema. When
+        ``success_scale > 1`` the "success count" is ``successes /
+        success_scale`` (for SLG: total bases can exceed AB, so we feed
+        TB/4 and AB into the Beta posterior).
     tau0:
         Per-stat pseudocount controlling prior strength.
     taus:
         Quantile levels to evaluate. Output columns follow
         :func:`_quantile_column_name` — e.g. ``q0_05`` for ``tau=0.05``.
+    success_scale:
+        Divisor for ``successes`` and multiplier for output quantiles. For
+        rate stats in [0, 1] (OBP, HR/PA, ...) pass 1.0. For SLG pass 4.0
+        so the posterior lives on the natural Beta support while quantiles
+        are reported in SLG's [0, 4] range.
 
     Returns
     -------
     pd.DataFrame
         One column per tau, same row index as ``preseason_rate`` (or
-        :func:`range(len)` for ndarray inputs). All values live in ``[0, 1]``
-        because the Beta distribution is supported on the unit interval —
-        which is the right support for rate targets including per-PA rates.
+        :func:`range(len)` for ndarray inputs). Values are in ``[0,
+        success_scale]`` — ``[0, 1]`` by default (rate targets), ``[0, 4]``
+        for SLG.
     """
     if isinstance(preseason_rate, pd.Series):
         idx = preseason_rate.index
@@ -322,6 +334,9 @@ def shrinkage_posterior_quantiles(
     succ_arr = np.asarray(successes, dtype=np.float64)
     trials_arr = np.asarray(trials, dtype=np.float64)
 
+    if success_scale != 1.0:
+        succ_arr = succ_arr / float(success_scale)
+
     # Prior parameters: alpha0 = tau0 * p, beta0 = tau0 * (1 - p).
     # Posterior: alpha = alpha0 + successes, beta = beta0 + (trials - successes).
     alpha = tau0 * pre_arr + succ_arr
@@ -333,7 +348,8 @@ def shrinkage_posterior_quantiles(
 
     cols = {}
     for tau in taus:
-        cols[_quantile_column_name(float(tau))] = _beta.ppf(float(tau), alpha, beta)
+        raw = _beta.ppf(float(tau), alpha, beta)
+        cols[_quantile_column_name(float(tau))] = raw * float(success_scale)
     return pd.DataFrame(cols, index=idx)
 
 
@@ -374,12 +390,23 @@ def predict_shrinkage_quantiles(
     out: dict[str, pd.DataFrame] = {}
     for stat, ros_col in zip(ROS_TARGET_STATS, ROS_RATE_TARGETS):
         succ, trials = ytd_successes_trials(rows, stat)
+        # SLG uses total bases as successes but total_bases can exceed AB
+        # (a HR is 4 TB in 1 AB). The naive Beta posterior then has
+        # ``beta = tau0*(1-p) + (trials - successes)`` < 0. Normalize to
+        # TB/4 and prior/4 so the posterior lives on [0, 1]; ``success_scale``
+        # rescales the emitted quantiles back to [0, 4] so downstream
+        # callers see SLG values in their natural range.
+        success_scale = 4.0 if stat == "slg" else 1.0
+        prior_rate = preseason_matrix[ros_col].reset_index(drop=True)
+        if success_scale != 1.0:
+            prior_rate = prior_rate / success_scale
         q_df = shrinkage_posterior_quantiles(
-            preseason_rate=preseason_matrix[ros_col].reset_index(drop=True),
+            preseason_rate=prior_rate,
             successes=succ.reset_index(drop=True),
             trials=trials.reset_index(drop=True),
             tau0=tau[stat],
             taus=taus,
+            success_scale=success_scale,
         )
         q_df.index = rows.index
         out[ros_col] = q_df

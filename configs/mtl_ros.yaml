@@ -17,6 +17,9 @@ model:
 
 loss:
   pa_loss: "mse"            # 'mse' or 'gaussian_nll'
+  # PA target is z-scored before the MSE loss so its magnitude (O(1)) is
+  # comparable with pinball-scale rate losses. pa_weight=1.0 balances the
+  # objectives roughly evenly; raise it if PA is the primary target.
   pa_weight: 1.0
 
 training:

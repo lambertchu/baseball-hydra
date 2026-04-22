@@ -360,7 +360,9 @@ def _phase2_feature_matrix(
     * ``compute_in_season_features`` on the snapshot rows.
     * Left-join against the preseason frame (on ``mlbam_id``/``season``)
       to pick up the requested preseason groups.
-    * Reindex to the trained feature order, filling missing columns with 0.0.
+    * Reindex to the trained feature order, filling missing columns with the
+      training-time feature mean (so they map to 0 in scaled space — neutral
+      rather than an extreme ``-mean/std`` value).
 
     Returns ``None`` when no feature names are recoverable from the ensemble
     (shouldn't happen for a fitted ensemble; defensive guard).
@@ -394,21 +396,55 @@ def _phase2_feature_matrix(
             how="left",
         )
 
-    # Reindex to the ensemble's trained feature order; fill anything missing
-    # with 0.0 (the predict path also replaces NaN with 0 inside the
-    # forecaster's scale-and-clamp step, so this is defensive). Log a warning
-    # mirroring the training-time warning so silent drift surfaces in logs.
+    # Reindex to the ensemble's trained feature order. Missing columns are
+    # filled with the training-time feature mean; after standardization that
+    # maps to exactly 0 (neutral), whereas filling with 0 in raw space would
+    # map to ``-mean/std`` — extreme for features with non-zero mean (age ≈
+    # -30/σ becomes a huge negative). Pulling ``scaler.mean_`` from the
+    # first seed is safe — every seed shares an identical scaler.
     missing = [name for name in feature_names if name not in enriched.columns]
     if missing:
         sample = sorted(missing)[:10]
         logger.warning(
-            "phase2 predict: %d features filled with 0.0: %s%s",
+            "phase2 predict: %d features missing; filling with training means. "
+            "Samples: %s%s",
             len(missing),
             sample,
             "..." if len(missing) > len(sample) else "",
         )
-    X = enriched.reindex(columns=feature_names).astype(float).fillna(0.0)
+
+    X = enriched.reindex(columns=feature_names).astype(float)
+    _fill_with_train_mean(X, ensemble, feature_names)
     return X
+
+
+def _fill_with_train_mean(
+    X: pd.DataFrame,
+    ensemble,
+    feature_names: list[str],
+) -> None:
+    """In-place NaN-fill using the ensemble's training-time feature means.
+
+    Any feature whose training mean cannot be recovered (defensively: no
+    fitted scaler on the first seed) falls back to 0.0 so the legacy
+    behavior is preserved for unfitted or partially-configured ensembles.
+    """
+    # Ensemble stores forecasters_ list; pull feature_scaler_ from the first.
+    forecasters = getattr(ensemble, "forecasters_", None)
+    if not forecasters:
+        X.fillna(0.0, inplace=True)
+        return
+    scaler = getattr(forecasters[0], "feature_scaler_", None)
+    train_feature_names = list(getattr(forecasters[0], "feature_names_", []) or [])
+    if scaler is None or not train_feature_names:
+        X.fillna(0.0, inplace=True)
+        return
+    mean_by_name: dict[str, float] = dict(zip(train_feature_names, scaler.mean_))
+    for col in feature_names:
+        # Default to 0.0 for any feature not seen by the scaler (shouldn't
+        # happen if feature_names matches the ensemble's trained names).
+        fill_val = float(mean_by_name.get(col, 0.0))
+        X[col] = X[col].fillna(fill_val)
 
 
 def predict_phase2(

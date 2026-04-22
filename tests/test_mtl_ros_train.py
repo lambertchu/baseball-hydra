@@ -243,6 +243,30 @@ class TestFeatureSelection:
         assert "park_factor_hr" in warn_text
 
 
+class TestEmptyTrainFrameRaises:
+    """When every train row has a NaN ROS target (e.g. bad snapshot data),
+    ``train_ros`` must raise a clear ValueError instead of passing an
+    empty array into ``StandardScaler.fit_transform``.
+    """
+
+    def test_all_nan_targets_raises(self):
+        snapshots = _make_synthetic_snapshots()
+        # Wipe every row's ROS rate target so the nan-drop removes them all.
+        for col in (
+            "ros_obp",
+            "ros_slg",
+            "ros_hr_per_pa",
+            "ros_r_per_pa",
+            "ros_rbi_per_pa",
+            "ros_sb_per_pa",
+        ):
+            snapshots[col] = np.nan
+        preseason = _make_synthetic_preseason(snapshots)
+        cfg = _tiny_config()
+        with pytest.raises(ValueError, match="No usable training rows"):
+            train_ros(cfg, snapshots_df=snapshots, preseason_df=preseason)
+
+
 class TestCLISmokeFlag:
     def test_cli_smoke_flag_runs_to_success(self, tmp_path, monkeypatch):
         """`main(--smoke)` builds a tiny model end-to-end and exits 0."""

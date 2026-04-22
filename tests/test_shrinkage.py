@@ -548,6 +548,84 @@ class TestShrinkagePosteriorQuantiles:
         )
         assert q.notna().all(axis=None)
 
+    def test_success_scale_handles_tb_greater_than_ab(self):
+        """SLG total bases can exceed AB (4 TB per HR, 1 AB). The naive
+        Beta posterior formula would produce negative beta parameters in
+        that regime; ``success_scale=4`` scales TB→TB/4 and reports the
+        quantile back in SLG's natural [0, 4] range.
+        """
+        # Prior SLG 0.5 (=> 0.125 on the [0,1] scale), 10 HRs in 10 AB
+        # (TB=40, successes scaled = 10). Without scale=4, beta would be:
+        # tau0*(1-0.5) + (10 - 40) = 50 - 30 = 20, but alpha would be
+        # tau0*0.5 + 40 = 90 → quantiles land outside natural SLG range.
+        q = shrinkage_posterior_quantiles(
+            preseason_rate=pd.Series([0.125]),  # 0.5/4
+            successes=pd.Series([40.0]),
+            trials=pd.Series([10.0]),
+            tau0=100.0,
+            taus=(0.5,),
+            success_scale=4.0,
+        )
+        # Output is in SLG range, i.e. max value is 4.
+        assert 0.0 <= float(q.iloc[0, 0]) <= 4.0
+
+
+class TestPredictShrinkageQuantilesSLG:
+    """predict_shrinkage_quantiles must route SLG through the TB/4 formulation.
+
+    Without ``success_scale=4`` for SLG, a checkpoint with 5 HRs in 5 AB
+    (TB=20, AB=5) would produce a negative beta parameter and fake quantiles
+    via the ``_POSTERIOR_PARAM_FLOOR`` clip.
+    """
+
+    def test_slg_with_extreme_tb_produces_valid_quantiles(self):
+        # Player with extreme power: 5 HRs in 5 AB.
+        rows = pd.DataFrame(
+            [
+                {
+                    "mlbam_id": 100,
+                    "season": 2024,
+                    "pa_ytd": 5.0,
+                    "ab_ytd": 5.0,
+                    "h_ytd": 5.0,
+                    "bb_ytd": 0.0,
+                    "hbp_ytd": 0.0,
+                    "sf_ytd": 0.0,
+                    "singles_ytd": 0.0,
+                    "doubles_ytd": 0.0,
+                    "triples_ytd": 0.0,
+                    "hr_ytd": 5.0,
+                    "r_ytd": 0.0,
+                    "rbi_ytd": 0.0,
+                    "sb_ytd": 0.0,
+                }
+            ]
+        )
+        preseason = pd.DataFrame(
+            [
+                {
+                    "mlbam_id": 100,
+                    "season": 2024,
+                    "target_obp": 0.33,
+                    "target_slg": 0.60,
+                    "target_hr": 0.04,
+                    "target_r": 0.13,
+                    "target_rbi": 0.14,
+                    "target_sb": 0.02,
+                }
+            ]
+        )
+        preds = predict_shrinkage_quantiles(rows, preseason, taus=(0.5,))
+        assert preds is not None
+        # All quantile outputs are finite and positive.
+        for target, df in preds.items():
+            assert df.notna().all(axis=None)
+            assert (df >= 0).all(axis=None)
+        # SLG quantile lives in [0, 4] rather than [0, 1] — the natural range.
+        slg_med = float(preds["ros_slg"].iloc[0, 0])
+        assert slg_med > 0.0
+        assert slg_med <= 4.0
+
 
 class TestPredictShrinkageQuantiles:
     def test_returns_dict_keyed_by_ros_target(self):
