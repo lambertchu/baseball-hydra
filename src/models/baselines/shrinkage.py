@@ -18,13 +18,21 @@ Successes/trials per stat
 * **HR/R/RBI/SB per PA** — successes = stat count, trials = PA
 
 All counts pulled from ``*_ytd`` columns in the weekly-snapshot schema.
+
+In addition to the posterior-mean point estimate, this module exposes a
+``shrinkage_posterior_quantiles`` helper that returns Beta-CDF quantiles of
+the posterior distribution for uncertainty-aware reporting (pinball loss,
+PIT coverage).
 """
+
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
+from scipy.stats import beta as _beta
 
 from src.eval.metrics import rmse
 from src.eval.ros_metrics import ROS_RATE_TARGETS, ROS_TARGET_STATS
@@ -70,6 +78,7 @@ def ytd_successes_trials(rows: pd.DataFrame, stat: str) -> tuple[pd.Series, pd.S
     Any NaN count is treated as 0 — a player-week with missing subtotals is
     treated as contributing no evidence for that stat, not as missing data.
     """
+
     def col(name: str) -> pd.Series:
         if name not in rows.columns:
             return pd.Series(0.0, index=rows.index)
@@ -192,9 +201,8 @@ def fit_tau_per_stat(
         join_cols.append("season")
 
     pre_target_cols = [f"target_{s}" for s in fittable]
-    pre_subset = (
-        preseason[join_cols + pre_target_cols]
-        .drop_duplicates(subset=join_cols)
+    pre_subset = preseason[join_cols + pre_target_cols].drop_duplicates(
+        subset=join_cols
     )
     joined = training_rows.merge(pre_subset, on=join_cols, how="inner")
 
@@ -222,3 +230,135 @@ def fit_tau_per_stat(
         result = minimize_scalar(loss, bounds=bounds, method="bounded")
         fitted[stat] = float(result.x)
     return fitted
+
+
+# ---------------------------------------------------------------------------
+# Beta posterior quantiles
+# ---------------------------------------------------------------------------
+
+# Minimum floor for ``alpha`` / ``beta`` Beta parameters. ``scipy.stats.beta.ppf``
+# returns NaN for non-positive parameters; clipping keeps downstream metrics
+# defined even in degenerate edge cases (e.g. negative preseason_rate from a
+# noisy MTL run, or tau0=0).
+_POSTERIOR_PARAM_FLOOR: float = 1e-3
+
+DEFAULT_QUANTILE_TAUS: tuple[float, ...] = (0.05, 0.25, 0.50, 0.75, 0.95)
+
+
+def _quantile_column_name(tau: float) -> str:
+    """Stable column name for a tau quantile (e.g. 0.05 → ``q0_05``).
+
+    Two-decimal formatting captures the conventional 5/25/50/75/95 grid
+    without introducing float-string noise.
+    """
+    return f"q{tau:.2f}".replace(".", "_")
+
+
+def shrinkage_posterior_quantiles(
+    preseason_rate: pd.Series | np.ndarray,
+    successes: pd.Series | np.ndarray,
+    trials: pd.Series | np.ndarray,
+    tau0: float,
+    taus: Sequence[float] = DEFAULT_QUANTILE_TAUS,
+) -> pd.DataFrame:
+    """Beta posterior quantiles for each row.
+
+    Builds the Beta(α, β) posterior implied by the pseudocount-weighted
+    prior and observed counts, then returns ``scipy.stats.beta.ppf(tau, α, β)``
+    at each requested ``tau`` level.
+
+    Parameters
+    ----------
+    preseason_rate:
+        Per-row preseason rate (prior mean). Will be cast to float.
+    successes, trials:
+        Observed counts from the weekly-snapshot schema.
+    tau0:
+        Per-stat pseudocount controlling prior strength.
+    taus:
+        Quantile levels to evaluate. Output columns follow
+        :func:`_quantile_column_name` — e.g. ``q0_05`` for ``tau=0.05``.
+
+    Returns
+    -------
+    pd.DataFrame
+        One column per tau, same row index as ``preseason_rate`` (or
+        :func:`range(len)` for ndarray inputs). All values live in ``[0, 1]``
+        because the Beta distribution is supported on the unit interval —
+        which is the right support for rate targets including per-PA rates.
+    """
+    if isinstance(preseason_rate, pd.Series):
+        idx = preseason_rate.index
+    elif isinstance(successes, pd.Series):
+        idx = successes.index
+    elif isinstance(trials, pd.Series):
+        idx = trials.index
+    else:
+        idx = pd.RangeIndex(len(np.asarray(preseason_rate)))
+
+    pre_arr = np.asarray(preseason_rate, dtype=np.float64)
+    succ_arr = np.asarray(successes, dtype=np.float64)
+    trials_arr = np.asarray(trials, dtype=np.float64)
+
+    # Prior parameters: alpha0 = tau0 * p, beta0 = tau0 * (1 - p).
+    # Posterior: alpha = alpha0 + successes, beta = beta0 + (trials - successes).
+    alpha = tau0 * pre_arr + succ_arr
+    beta = tau0 * (1.0 - pre_arr) + (trials_arr - succ_arr)
+
+    # Clip to a positive floor so scipy's ppf stays well-defined.
+    alpha = np.clip(alpha, _POSTERIOR_PARAM_FLOOR, None)
+    beta = np.clip(beta, _POSTERIOR_PARAM_FLOOR, None)
+
+    cols = {}
+    for tau in taus:
+        cols[_quantile_column_name(float(tau))] = _beta.ppf(float(tau), alpha, beta)
+    return pd.DataFrame(cols, index=idx)
+
+
+def predict_shrinkage_quantiles(
+    rows: pd.DataFrame,
+    preseason: pd.DataFrame | None = None,
+    tau_per_stat: dict[str, float] | None = None,
+    id_col: str = "mlbam_id",
+    taus: Sequence[float] = DEFAULT_QUANTILE_TAUS,
+    preseason_matrix: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame] | None:
+    """Predict ROS rate quantiles for checkpoint ``rows`` via Beta posterior.
+
+    Returns a dict keyed by ROS rate target name (e.g. ``"ros_obp"``) with a
+    per-target DataFrame of quantile predictions. Mirrors the alignment
+    semantics of :func:`predict_shrinkage` — passing a ``preseason_matrix``
+    lets the caller reuse an alignment it has already done, otherwise the
+    raw ``preseason`` frame is aligned internally.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame] | None
+        ``{ros_target: DataFrame[quantile_columns]}`` with one row per
+        entry of ``rows`` and one column per tau level. ``None`` when the
+        preseason cache is unusable (missing join key, missing target
+        columns, zero ID overlap).
+    """
+    if preseason_matrix is None:
+        if preseason is None:
+            raise ValueError(
+                "predict_shrinkage_quantiles requires preseason or preseason_matrix"
+            )
+        preseason_matrix = _align_preseason(rows, preseason, id_col=id_col)
+        if preseason_matrix is None:
+            return None
+
+    tau = {**DEFAULT_TAU0, **(tau_per_stat or {})}
+    out: dict[str, pd.DataFrame] = {}
+    for stat, ros_col in zip(ROS_TARGET_STATS, ROS_RATE_TARGETS):
+        succ, trials = ytd_successes_trials(rows, stat)
+        q_df = shrinkage_posterior_quantiles(
+            preseason_rate=preseason_matrix[ros_col].reset_index(drop=True),
+            successes=succ.reset_index(drop=True),
+            trials=trials.reset_index(drop=True),
+            tau0=tau[stat],
+            taus=taus,
+        )
+        q_df.index = rows.index
+        out[ros_col] = q_df
+    return out

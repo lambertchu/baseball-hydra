@@ -12,6 +12,7 @@ Usage
     fig = plot_calibration_scatter(y_true, y_pred, target_names, "Ridge")
     save_figure(fig, "data/reports/comparison/calibration_ridge.png")
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -289,7 +290,12 @@ def plot_training_curves(
         ax2 = ax1.twinx()
         color2 = "#DD8452"
         ax2.plot(
-            epochs, val_rmse, color=color2, linewidth=1.5, label="Val RMSE", linestyle="--"
+            epochs,
+            val_rmse,
+            color=color2,
+            linewidth=1.5,
+            label="Val RMSE",
+            linestyle="--",
         )
         ax2.set_ylabel("Validation RMSE", color=color2)
         ax2.tick_params(axis="y", labelcolor=color2)
@@ -305,6 +311,133 @@ def plot_training_curves(
     ax1.grid(alpha=0.3)
     fig.tight_layout()
     return fig
+
+
+def plot_pit_histogram(
+    y_true: pd.DataFrame | np.ndarray,
+    y_quantiles: np.ndarray,
+    taus: list[float] | tuple[float, ...],
+    target_names: list[str],
+    path: str | Path,
+) -> Path:
+    """Per-target PIT reliability histogram.
+
+    For each target column in ``y_true``, compute the empirical PIT value
+    ``P(y <= q_tau)`` at every requested ``tau``, bin them, and draw the
+    histogram against the ideal uniform reference line. A well-calibrated
+    quantile forecaster produces bars of approximately equal height at
+    level ``1 / n_taus``.
+
+    Parameters
+    ----------
+    y_true:
+        Shape ``(n_samples, n_targets)``. Ground-truth ROS rate outcomes.
+    y_quantiles:
+        Shape ``(n_samples, n_targets, n_quantiles)`` — quantile predictions
+        aligned with ``taus``. ``n_quantiles == len(taus)``.
+    taus:
+        Nominal quantile levels, e.g. ``(0.05, 0.25, 0.50, 0.75, 0.95)``.
+    target_names:
+        Display names for each target (one per column in ``y_true``).
+    path:
+        Output PNG path. Parent directories are created.
+
+    Returns
+    -------
+    Path
+        Location of the written file.
+    """
+    y_true_arr = np.asarray(y_true, dtype=np.float64)
+    if y_true_arr.ndim == 1:
+        y_true_arr = y_true_arr.reshape(-1, 1)
+    y_quant_arr = np.asarray(y_quantiles, dtype=np.float64)
+    if y_quant_arr.ndim == 2:
+        y_quant_arr = y_quant_arr.reshape(y_quant_arr.shape[0], 1, y_quant_arr.shape[1])
+
+    n_targets = y_true_arr.shape[1]
+    n_taus = len(taus)
+    if y_quant_arr.shape[:2] != y_true_arr.shape:
+        raise ValueError(
+            f"y_quantiles shape {y_quant_arr.shape} incompatible with y_true {y_true_arr.shape}",
+        )
+    if y_quant_arr.shape[2] != n_taus:
+        raise ValueError(
+            f"y_quantiles has {y_quant_arr.shape[2]} quantiles but {n_taus} taus",
+        )
+    if len(target_names) != n_targets:
+        raise ValueError(
+            f"target_names ({len(target_names)}) != n_targets ({n_targets})",
+        )
+
+    taus_arr = np.asarray(taus, dtype=np.float64)
+    order = np.argsort(taus_arr)
+    taus_sorted = taus_arr[order]
+
+    nrows = (n_targets + 2) // 3
+    ncols = min(n_targets, 3)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    if n_targets == 1:
+        axes = np.array([axes])
+    axes_flat = axes.flat
+
+    # Bar x positions share the sorted-tau grid so plots are comparable
+    # across targets even if callers passed taus out of order.
+    bar_x = taus_sorted
+    # Ideal uniform density: each tau bucket holds a 1/n_taus fraction.
+    ideal_height = 1.0 / n_taus
+    bar_width = float(np.min(np.diff(taus_sorted))) * 0.7 if n_taus > 1 else 0.08
+
+    for i in range(n_targets):
+        ax = axes_flat[i]
+        # Empirical coverage at each tau = mean(y_true <= q_tau).
+        cov = np.mean(
+            y_true_arr[:, i : i + 1] <= y_quant_arr[:, i, order],
+            axis=0,
+        )
+        # Convert cumulative coverage into per-bucket empirical density by
+        # differencing against the previous tau; the first bucket uses 0 as
+        # the left boundary.
+        cov_with_zero = np.concatenate([[0.0], cov])
+        buckets = np.diff(cov_with_zero)
+
+        ax.bar(
+            bar_x,
+            buckets,
+            width=bar_width,
+            color="#4C72B0",
+            alpha=0.7,
+            edgecolor="black",
+            linewidth=0.5,
+            label="Empirical",
+        )
+        ax.axhline(
+            ideal_height,
+            color="red",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Ideal (1/{n_taus})",
+        )
+
+        name = target_names[i] if i < len(target_names) else f"Target {i}"
+        ax.set_xlabel("Nominal tau")
+        ax.set_ylabel("Empirical bucket density")
+        ax.set_title(name)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(bottom=0.0)
+        if i == 0:
+            ax.legend(loc="upper right", fontsize=8)
+
+    for j in range(n_targets, len(list(axes_flat))):
+        axes_flat[j].set_visible(False)
+
+    fig.suptitle("PIT reliability (per-target)", fontsize=14, y=1.02)
+    fig.tight_layout()
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out
 
 
 def save_figure(
