@@ -267,6 +267,26 @@ class TestEmptyTrainFrameRaises:
             train_ros(cfg, snapshots_df=snapshots, preseason_df=preseason)
 
 
+class TestInsufficientTrainBatchRaises:
+    """With ``drop_last=True`` on the training DataLoader (F8 fix), a
+    train frame smaller than ``batch_size`` would silently produce an
+    empty loader → unfit model. ``train_ros`` must fail loudly.
+    """
+
+    def test_train_rows_below_batch_size_raises(self):
+        snapshots = _make_synthetic_snapshots(
+            seasons=(2020, 2021, 2022),
+            players=(101, 102),
+            weeks_per_season=(20,),
+        )
+        preseason = _make_synthetic_preseason(snapshots)
+        cfg = _tiny_config()
+        # Train split = seasons ≤ 2022 → 4 rows. batch_size = 64 forces <.
+        cfg["training"]["batch_size"] = 64
+        with pytest.raises(ValueError, match="Insufficient training rows"):
+            train_ros(cfg, snapshots_df=snapshots, preseason_df=preseason)
+
+
 class TestCLISmokeFlag:
     def test_cli_smoke_flag_runs_to_success(self, tmp_path, monkeypatch):
         """`main(--smoke)` builds a tiny model end-to-end and exits 0."""

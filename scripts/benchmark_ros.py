@@ -394,6 +394,7 @@ def _phase2_feature_matrix(
             pre,
             on=list(PLAYER_SEASON_KEY),
             how="left",
+            validate="many_to_one",
         )
 
     # Reindex to the ensemble's trained feature order. Missing columns are
@@ -440,11 +441,11 @@ def _fill_with_train_mean(
         X.fillna(0.0, inplace=True)
         return
     mean_by_name: dict[str, float] = dict(zip(train_feature_names, scaler.mean_))
-    for col in feature_names:
-        # Default to 0.0 for any feature not seen by the scaler (shouldn't
-        # happen if feature_names matches the ensemble's trained names).
-        fill_val = float(mean_by_name.get(col, 0.0))
-        X[col] = X[col].fillna(fill_val)
+    # Vectorized: fillna(dict) fills each column with its training mean;
+    # columns not in the dict (shouldn't happen for a matched ensemble) get
+    # a 0.0 fallback on the second pass.
+    X.fillna(value=mean_by_name, inplace=True)
+    X.fillna(value=0.0, inplace=True)
 
 
 def predict_phase2(

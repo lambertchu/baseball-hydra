@@ -342,6 +342,18 @@ def train_ros(
             "No usable training rows after filtering; check min_ytd_pa, "
             "snapshot coverage, or split boundaries."
         )
+    # The training DataLoader uses drop_last=True to avoid the BatchNorm1d
+    # batch-of-1 crash (see src/models/mtl_ros/model.py). That means a
+    # train_frame smaller than batch_size yields an empty loader and a
+    # silently unfit ensemble. Fail loudly with an actionable error.
+    batch_size = int(train_cfg.get("batch_size", 64))
+    if len(train_frame) < batch_size:
+        raise ValueError(
+            f"Insufficient training rows ({len(train_frame)}) for batch_size "
+            f"{batch_size}; with drop_last=True the DataLoader would be empty. "
+            f"Reduce training.batch_size in the config or widen min_ytd_pa / "
+            f"split boundaries."
+        )
     logger.info(
         "Split sizes — train: %d, val: %s",
         len(train_frame),

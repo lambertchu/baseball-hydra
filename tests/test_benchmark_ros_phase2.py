@@ -260,6 +260,22 @@ class TestPhase2Prediction:
         diffs = np.diff(q_arr, axis=-1)
         assert (diffs >= -1e-9).all(), "phase2 quantiles must be sorted"
 
+    def test_duplicate_preseason_keys_raises(self):
+        """`_phase2_feature_matrix` uses validate='many_to_one' on the
+        preseason merge: a preseason frame with duplicate (mlbam_id, season)
+        rows must fail loudly instead of silently duplicating snapshot rows.
+        """
+        rows = self._checkpoint_rows()
+        preseason_ok = _make_preseason_cache()
+        preseason_bad = pd.concat(
+            [preseason_ok, preseason_ok.iloc[:1]], ignore_index=True
+        )
+        fake = _FakePhase2Ensemble(
+            feature_names=["pa_ytd"], taus=[0.05, 0.25, 0.5, 0.75, 0.95]
+        )
+        with pytest.raises(pd.errors.MergeError):
+            br._phase2_feature_matrix(rows, fake, {}, preseason_bad)
+
     def test_evaluate_checkpoint_includes_phase2_quantile_metrics(self):
         rows = self._checkpoint_rows()
         preseason = _make_preseason_cache()
