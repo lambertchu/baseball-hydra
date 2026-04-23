@@ -47,6 +47,10 @@ _SEASON_DATES: dict[int, tuple[str, str]] = {
     2023: ("2023-03-30", "2023-10-01"),
     2024: ("2024-03-20", "2024-09-29"),
     2025: ("2025-03-27", "2025-09-28"),
+    # 2026 season in progress — end date clamped to the latest completed
+    # ISO week so fetchers don't hit future-dated empty ranges on BRef /
+    # Statcast. Update as the season progresses (or drive from today()).
+    2026: ("2026-03-26", "2026-04-20"),
 }
 
 
