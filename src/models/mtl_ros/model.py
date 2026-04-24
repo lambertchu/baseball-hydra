@@ -202,18 +202,18 @@ class MTLQuantileNetwork(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Run the network.
-
-        Returns a dict::
-
-            {
-                "quantiles":    (batch, n_targets, n_quantiles),
-                "pa_remaining": (batch, 1),
-            }
-        """
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode scaled Phase 2 features into the shared latent state."""
         x = self.batch_norm(x)
-        shared = self.backbone(x)
+        return self.backbone(x)
+
+    def decode_from_latent(self, shared: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Decode a shared latent state with the Phase 2 quantile/PA heads.
+
+        This is factored out for Phase 3's sequential ROS model, which builds
+        its own GRU latent and then reuses these frozen decoder heads.  The
+        logic is intentionally identical to the previous ``forward`` body.
+        """
         pa_out = self.pa_head(shared)  # (batch, 1)
 
         quantile_outputs: list[torch.Tensor] = [None] * self.n_targets  # type: ignore[list-item]
@@ -244,6 +244,18 @@ class MTLQuantileNetwork(nn.Module):
         # Stack per-target (batch, n_quantiles) → (batch, n_targets, n_quantiles).
         quantiles = torch.stack(quantile_outputs, dim=1)
         return {"quantiles": quantiles, "pa_remaining": pa_out}
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Run the network.
+
+        Returns a dict::
+
+            {
+                "quantiles":    (batch, n_targets, n_quantiles),
+                "pa_remaining": (batch, 1),
+            }
+        """
+        return self.decode_from_latent(self.encode(x))
 
 
 # ---------------------------------------------------------------------------

@@ -76,13 +76,19 @@ _BASELINES_NO_PRESEASON = ("persist_observed",)
 # Preseason-dependent baselines — all need the per-year preseason cache frame
 # for alignment. phase2 additionally needs the weekly snapshot files for its
 # own training pass.
-_BASELINES_NEED_PRESEASON = ("frozen_preseason", "marcel_blend", "shrinkage", "phase2")
+_BASELINES_NEED_PRESEASON = (
+    "frozen_preseason",
+    "marcel_blend",
+    "shrinkage",
+    "phase2",
+    "phase3",
+)
 ALL_BASELINES = (*_BASELINES_NO_PRESEASON, *_BASELINES_NEED_PRESEASON)
 
 # Baselines that emit full quantile arrays (shape (n, 6, n_taus)) alongside
 # their point estimate. These are the ones that participate in pinball / PIT
 # metrics; point-only baselines contribute to RMSE only.
-_BASELINES_EMIT_QUANTILES = ("shrinkage", "phase2")
+_BASELINES_EMIT_QUANTILES = ("shrinkage", "phase2", "phase3")
 
 _BASELINE_DISPLAY = {
     "persist_observed": "PersistObs",
@@ -90,12 +96,15 @@ _BASELINE_DISPLAY = {
     "marcel_blend": "MarcelBlend",
     "shrinkage": "Shrinkage",
     "phase2": "Phase2",
+    "phase3": "Phase3",
 }
 
 _DEFAULT_CACHE_DIR = Path("data/reports/benchmark_ros/preseason")
 _DEFAULT_OUTPUT_DIR = Path("data/reports/benchmark_ros")
 _DEFAULT_PHASE2_CACHE_DIR = Path("data/reports/benchmark_ros/phase2")
 _DEFAULT_PHASE2_CONFIG = Path("configs/mtl_ros.yaml")
+_DEFAULT_PHASE3_CACHE_DIR = Path("data/reports/benchmark_ros/phase3")
+_DEFAULT_PHASE3_CONFIG = Path("configs/ros.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +237,23 @@ def _load_phase2_config(
     return cfg
 
 
+def _load_phase3_config(
+    config_path: Path,
+    epochs_override: int | None,
+    n_seeds_override: int | None,
+) -> dict:
+    """Load Phase 3 YAML config with optional benchmark-speed overrides."""
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+    cfg.setdefault("training", {})
+    cfg.setdefault("ensemble", {})
+    if epochs_override is not None:
+        cfg["training"]["epochs"] = int(epochs_override)
+    if n_seeds_override is not None:
+        cfg["ensemble"]["n_seeds"] = int(n_seeds_override)
+    return cfg
+
+
 def _phase2_training_snapshots_for_year(
     eval_year: int,
     raw_dir: Path,
@@ -343,6 +369,67 @@ def _phase2_eval_preseason_frame(
     if eval_pre.empty:
         return None
     return eval_pre.copy()
+
+
+def _load_or_train_phase3_ensemble(
+    eval_year: int,
+    phase3_cache_dir: Path,
+    phase3_config: dict,
+    raw_dir: Path,
+    df_featured: pd.DataFrame | None,
+    retrain: bool,
+    base_forecaster,
+):
+    """Return a fitted Phase 3 GRU ensemble for ``eval_year``."""
+    from src.models.ros.model import ROSSequenceEnsembleForecaster
+    from src.models.ros.train import train_ros_sequence
+
+    year_dir = phase3_cache_dir / f"year_{eval_year}"
+    meta_path = year_dir / "ensemble_meta.json"
+    if meta_path.exists() and not retrain:
+        logger.info("  Loaded Phase 3 ensemble cache %s", year_dir)
+        return ROSSequenceEnsembleForecaster.load(year_dir)
+
+    if not retrain:
+        logger.warning(
+            "  Phase 3 cache missing for %d (%s); skipping phase3 for this year. "
+            "Pass --retrain to train from scratch.",
+            eval_year,
+            year_dir,
+        )
+        return None
+
+    if base_forecaster is None:
+        logger.warning(
+            "  Phase 3 requires a Phase 2 seed_0 base forecaster for %d; skipping.",
+            eval_year,
+        )
+        return None
+
+    snapshots = _phase2_training_snapshots_for_year(eval_year, raw_dir)
+    preseason_df = (
+        df_featured.loc[df_featured["season"] < eval_year].copy()
+        if df_featured is not None
+        else None
+    )
+    phase3_config = dict(phase3_config)
+    phase3_config.setdefault("splits", {})
+    phase3_config["splits"] = {"train_end_season": int(eval_year - 1)}
+    logger.info(
+        "  Training Phase 3 ensemble for eval_year=%d on %d snapshot rows",
+        eval_year,
+        len(snapshots),
+    )
+    ensemble = train_ros_sequence(
+        phase3_config,
+        snapshots_df=snapshots,
+        preseason_df=preseason_df,
+        base_forecaster=base_forecaster,
+    )
+    year_dir.mkdir(parents=True, exist_ok=True)
+    ensemble.save(year_dir)
+    logger.info("  Cached Phase 3 ensemble → %s", year_dir)
+    return ensemble
 
 
 def _phase2_feature_matrix(
@@ -479,6 +566,69 @@ def predict_phase2(
 
     median = q_arr[:, :, median_idx]
     point_df = pd.DataFrame(median, columns=list(ROS_RATE_TARGETS))
+    point_df.index = rows.index
+    return point_df, q_arr
+
+
+def _phase3_feature_matrix(
+    context_rows: pd.DataFrame,
+    ensemble,
+    preseason: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Build Phase 2 feature rows for the Phase 3 ensemble's frozen base."""
+    from src.models.ros.train import build_phase2_feature_frame
+
+    forecasters = getattr(ensemble, "forecasters_", None)
+    if not forecasters:
+        return pd.DataFrame(index=context_rows.index)
+    base = getattr(forecasters[0], "base_forecaster", None)
+    if base is None:
+        return pd.DataFrame(index=context_rows.index)
+    return build_phase2_feature_frame(context_rows, base, preseason)
+
+
+def predict_phase3(
+    rows: pd.DataFrame,
+    yearly_snapshots: pd.DataFrame,
+    ensemble,
+    phase3_config: dict,
+    preseason: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, np.ndarray] | None:
+    """Return Phase 3 point + quantile predictions for checkpoint rows.
+
+    ``yearly_snapshots`` supplies the full within-season context.  The Phase 3
+    dataset slices each player trajectory at the requested cutoff, so future
+    rows in the same yearly frame do not leak into earlier cutoffs.
+    """
+    if rows.empty:
+        return None
+    key_cols = list(PLAYER_SEASON_KEY) + ["iso_year", "iso_week"]
+    needed_player_seasons = rows[list(PLAYER_SEASON_KEY)].drop_duplicates()
+    context = yearly_snapshots.merge(
+        needed_player_seasons,
+        on=list(PLAYER_SEASON_KEY),
+        how="inner",
+    ).reset_index(drop=True)
+    if context.empty:
+        return None
+
+    X_context = _phase3_feature_matrix(context, ensemble, preseason)
+    preds = ensemble.predict(context, X_context)
+    q_context = np.asarray(preds["quantiles"], dtype=np.float64)
+
+    context_keys = context[key_cols].reset_index().rename(columns={"index": "__pos"})
+    lookup = rows[key_cols].merge(context_keys, on=key_cols, how="left")
+    if lookup["__pos"].isna().any():
+        return None
+    pos = lookup["__pos"].astype(int).to_numpy()
+    q_arr = q_context[pos]
+
+    taus = list(phase3_config.get("model", {}).get("taus", DEFAULT_QUANTILE_TAUS))
+    try:
+        median_idx = taus.index(0.5)
+    except ValueError:
+        median_idx = q_arr.shape[-1] // 2
+    point_df = pd.DataFrame(q_arr[:, :, median_idx], columns=list(ROS_RATE_TARGETS))
     point_df.index = rows.index
     return point_df, q_arr
 
@@ -640,6 +790,10 @@ def evaluate_checkpoint(
     phase2_ensemble=None,
     phase2_config: dict | None = None,
     phase2_preseason: pd.DataFrame | None = None,
+    phase3_ensemble=None,
+    phase3_config: dict | None = None,
+    phase3_preseason: pd.DataFrame | None = None,
+    phase3_context_snapshots: pd.DataFrame | None = None,
     quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS,
 ) -> dict:
     """Compute point + quantile metrics for each baseline at one PA checkpoint.
@@ -723,6 +877,24 @@ def evaluate_checkpoint(
             predictions["phase2"] = point_df
             quantile_preds["phase2"] = q_arr
 
+    if (
+        "phase3" in baselines
+        and phase3_ensemble is not None
+        and phase3_context_snapshots is not None
+    ):
+        phase3_pre_arg = phase3_preseason if phase3_preseason is not None else preseason
+        phase3_preds = predict_phase3(
+            checkpoint_rows,
+            phase3_context_snapshots,
+            phase3_ensemble,
+            phase3_config or {},
+            phase3_pre_arg,
+        )
+        if phase3_preds is not None:
+            point_df, q_arr = phase3_preds
+            predictions["phase3"] = point_df
+            quantile_preds["phase3"] = q_arr
+
     if not predictions:
         return {"n_players": 0, "systems": {}}
 
@@ -789,6 +961,9 @@ def evaluate_year(
     phase2_ensemble=None,
     phase2_config: dict | None = None,
     phase2_preseason: pd.DataFrame | None = None,
+    phase3_ensemble=None,
+    phase3_config: dict | None = None,
+    phase3_preseason: pd.DataFrame | None = None,
     quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS,
 ) -> dict:
     """Run all thresholds for one season's snapshots."""
@@ -806,6 +981,10 @@ def evaluate_year(
             phase2_ensemble=phase2_ensemble,
             phase2_config=phase2_config,
             phase2_preseason=phase2_preseason,
+            phase3_ensemble=phase3_ensemble,
+            phase3_config=phase3_config,
+            phase3_preseason=phase3_preseason,
+            phase3_context_snapshots=yearly,
             quantile_taus=quantile_taus,
         )
         out["thresholds"][t] = result
@@ -1272,6 +1451,30 @@ def main() -> None:
         help="Directory for per-year Phase 2 ensemble checkpoints.",
     )
     parser.add_argument(
+        "--phase3-config",
+        type=str,
+        default=str(_DEFAULT_PHASE3_CONFIG),
+        help="YAML config for the Phase 3 GRU ensemble (used when phase3 is in --include).",
+    )
+    parser.add_argument(
+        "--phase3-epochs",
+        type=int,
+        default=None,
+        help="Override training.epochs in the Phase 3 config for benchmark speed.",
+    )
+    parser.add_argument(
+        "--phase3-n-seeds",
+        type=int,
+        default=None,
+        help="Override ensemble.n_seeds in the Phase 3 config.",
+    )
+    parser.add_argument(
+        "--phase3-cache-dir",
+        type=str,
+        default=str(_DEFAULT_PHASE3_CACHE_DIR),
+        help="Directory for per-year Phase 3 ensemble checkpoints.",
+    )
+    parser.add_argument(
         "--pit-plot",
         action="store_true",
         help="Emit pit_{baseline}.png plots for every baseline that produced "
@@ -1283,6 +1486,7 @@ def main() -> None:
     cache_dir = Path(args.cache_dir)
     output_dir = Path(args.output_dir)
     phase2_cache_dir = Path(args.phase2_cache_dir)
+    phase3_cache_dir = Path(args.phase3_cache_dir)
     years = sorted(args.years)
 
     logger.info(
@@ -1298,7 +1502,8 @@ def main() -> None:
     # preseason-dependent baselines; load the merged frame once when requested.
     need_preseason = any(b in args.include for b in _BASELINES_NEED_PRESEASON)
     want_phase2 = "phase2" in args.include
-    if (need_preseason and args.retrain) or want_phase2:
+    want_phase3 = "phase3" in args.include
+    if (need_preseason and args.retrain) or want_phase2 or want_phase3:
         logger.info("Loading merged data + building features (for retraining) …")
         df = pd.read_parquet(args.data)
         with open(args.data_config) as f:
@@ -1389,6 +1594,67 @@ def main() -> None:
                     year, df_featured
                 )
 
+    # Phase 3 ensemble — one per eval year, using the Phase 2 seed_0 as its
+    # frozen prior/decoder base. If phase2 was not explicitly requested, we
+    # still load/train the Phase 2 base because Phase 3 depends on it.
+    phase3_by_year: dict[int, object | None] = {}
+    phase3_preseason_by_year: dict[int, pd.DataFrame | None] = {}
+    phase3_config: dict | None = None
+    if want_phase3:
+        phase3_config_path = Path(args.phase3_config)
+        if not phase3_config_path.exists():
+            logger.warning(
+                "phase3 baseline requested but config %s is missing; skipping phase3.",
+                phase3_config_path,
+            )
+        else:
+            phase3_config = _load_phase3_config(
+                phase3_config_path,
+                epochs_override=args.phase3_epochs,
+                n_seeds_override=args.phase3_n_seeds,
+            )
+            if phase2_config is None:
+                phase2_config_path = Path(args.phase2_config)
+                if phase2_config_path.exists():
+                    phase2_config = _load_phase2_config(
+                        phase2_config_path,
+                        epochs_override=args.phase2_epochs,
+                        n_seeds_override=args.phase2_n_seeds,
+                    )
+            raw_dir_path = Path(args.raw_dir)
+            for year in years:
+                if phase2_by_year.get(year) is None and phase2_config is not None:
+                    try:
+                        phase2_by_year[year] = _load_or_train_phase2_ensemble(
+                            eval_year=year,
+                            phase2_cache_dir=phase2_cache_dir,
+                            phase2_config=phase2_config,
+                            raw_dir=raw_dir_path,
+                            df_featured=df_featured,
+                            retrain=args.retrain,
+                        )
+                    except FileNotFoundError as exc:
+                        logger.error("Skipping phase3 base for %d: %s", year, exc)
+                base_forecaster = None
+                if phase2_by_year.get(year) is not None:
+                    base_forecaster = phase2_by_year[year].forecasters_[0]
+                try:
+                    phase3_by_year[year] = _load_or_train_phase3_ensemble(
+                        eval_year=year,
+                        phase3_cache_dir=phase3_cache_dir,
+                        phase3_config=phase3_config,
+                        raw_dir=raw_dir_path,
+                        df_featured=df_featured,
+                        retrain=args.retrain,
+                        base_forecaster=base_forecaster,
+                    )
+                except (FileNotFoundError, ValueError) as exc:
+                    logger.error("Skipping phase3 for %d: %s", year, exc)
+                    phase3_by_year[year] = None
+                phase3_preseason_by_year[year] = _phase2_eval_preseason_frame(
+                    year, df_featured
+                )
+
     # The Phase 2 ensemble emits quantiles aligned with ``model.taus`` from the
     # config. Shrinkage's Beta-CDF quantiles are requested at the same grid via
     # ``evaluate_checkpoint``'s ``quantile_taus`` argument. Scoring
@@ -1400,6 +1666,10 @@ def main() -> None:
     quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS
     if phase2_config is not None:
         configured = phase2_config.get("model", {}).get("taus")
+        if configured:
+            quantile_taus = tuple(float(t) for t in configured)
+    if phase3_config is not None:
+        configured = phase3_config.get("model", {}).get("taus")
         if configured:
             quantile_taus = tuple(float(t) for t in configured)
 
@@ -1420,6 +1690,9 @@ def main() -> None:
             phase2_ensemble=phase2_by_year.get(year),
             phase2_config=phase2_config,
             phase2_preseason=phase2_preseason_by_year.get(year),
+            phase3_ensemble=phase3_by_year.get(year),
+            phase3_config=phase3_config,
+            phase3_preseason=phase3_preseason_by_year.get(year),
             quantile_taus=quantile_taus,
         )
         year_results.append(result)
