@@ -11,6 +11,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import benchmark_ros as br  # noqa: E402
+import generate_ros_projections as grp  # noqa: E402
 from src.eval.ros_metrics import ROS_RATE_TARGETS  # noqa: E402
 
 
@@ -76,6 +77,22 @@ def test_phase3_baseline_registered() -> None:
     assert "phase3" in br._BASELINES_NEED_PRESEASON
     assert "phase3" in br._BASELINES_EMIT_QUANTILES
     assert br._BASELINE_DISPLAY["phase3"] == "Phase3"
+
+
+def test_train_only_split_override_drops_yaml_holdouts() -> None:
+    cfg = {
+        "splits": {
+            "train_end_season": 2022,
+            "val_season": 2023,
+            "test_season": 2024,
+        }
+    }
+
+    br._force_train_only_splits(cfg, 2024)
+    assert cfg["splits"] == {"train_end_season": 2024}
+
+    grp._force_train_only_splits(cfg, 2025)
+    assert cfg["splits"] == {"train_end_season": 2025}
 
 
 def test_predict_phase3_maps_full_context_back_to_checkpoint_rows() -> None:

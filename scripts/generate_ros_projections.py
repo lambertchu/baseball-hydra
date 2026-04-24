@@ -103,6 +103,11 @@ def _latest_row_per_player(snapshots: pd.DataFrame) -> pd.DataFrame:
     return snapshots.loc[idx].reset_index(drop=True)
 
 
+def _force_train_only_splits(config: dict, train_end_season: int) -> None:
+    """Replace split config with train-only boundaries for production retrains."""
+    config["splits"] = {"train_end_season": int(train_end_season)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--year", type=int, default=2026)
@@ -150,8 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("training", {})["epochs"] = int(args.epochs)
     if args.device is not None:
         config.setdefault("training", {})["device"] = args.device
-    # Force splits so EVERY historical row lands in train.
-    config["splits"] = {"train_end_season": int(args.year - 1)}
+    # Force splits so EVERY historical row lands in train and the YAML holdouts
+    # are disabled for this train-on-all-history projection run.
+    _force_train_only_splits(config, args.year - 1)
 
     # --- Training data --------------------------------------------------
     snapshots_train = _load_historical_snapshots(args.raw_dir, args.year)
@@ -190,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             phase3_config.setdefault("training", {})["epochs"] = int(args.epochs)
         if args.device is not None:
             phase3_config.setdefault("training", {})["device"] = args.device
-        phase3_config["splits"] = {"train_end_season": int(args.year - 1)}
+        _force_train_only_splits(phase3_config, args.year - 1)
         ensemble = train_ros_sequence(
             phase3_config,
             snapshots_df=snapshots_train,

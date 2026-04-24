@@ -49,9 +49,13 @@ class ROSCutoffSequenceDataset(Dataset):
             .reindex(columns=list(sequence_feature_cols))
             .astype("float32")
             .fillna(0.0)
+            .to_numpy(dtype=np.float32, copy=True)
         )
         self.phase2_features = (
-            phase2_features.reset_index(drop=True).astype("float32").fillna(0.0)
+            phase2_features.reset_index(drop=True)
+            .astype("float32")
+            .fillna(0.0)
+            .to_numpy(dtype=np.float32, copy=True)
         )
         self.max_seq_len = int(max_seq_len)
         self.sequence_feature_cols = list(sequence_feature_cols)
@@ -89,32 +93,29 @@ class ROSCutoffSequenceDataset(Dataset):
             for row in self.snapshots[list(_ROW_KEY_COLS)].to_numpy()
         ]
 
-        self._positions_by_group = self._build_positions_by_group()
+        self._positions_by_group, self._position_rank = self._build_positions_by_group()
 
-    def _build_positions_by_group(self) -> dict[tuple[int, int], list[int]]:
+    def _build_positions_by_group(
+        self,
+    ) -> tuple[dict[tuple[int, int], np.ndarray], np.ndarray]:
         ordered = self.snapshots.reset_index(names="__pos").sort_values(
             list(_SORT_COLS)
         )
-        out: dict[tuple[int, int], list[int]] = {}
+        out: dict[tuple[int, int], np.ndarray] = {}
+        rank = np.zeros(len(self.snapshots), dtype=np.int32)
         for key, frame in ordered.groupby(list(_KEY_COLS), sort=False):
-            out[tuple(int(v) for v in key)] = frame["__pos"].astype(int).tolist()
-        return out
+            positions = frame["__pos"].to_numpy(dtype=np.int64, copy=True)
+            out[tuple(int(v) for v in key)] = positions
+            rank[positions] = np.arange(len(positions), dtype=np.int32)
+        return out, rank
 
-    def _history_positions(self, idx: int) -> list[int]:
-        row = self.snapshots.iloc[idx]
-        key = (int(row["mlbam_id"]), int(row["season"]))
+    def _history_positions(self, idx: int) -> np.ndarray:
+        mlbam_id, season, _, _ = self.row_keys[idx]
+        key = (mlbam_id, season)
         positions = self._positions_by_group[key]
-        cutoff = (
-            int(row["iso_year"]),
-            int(row["iso_week"]),
-        )
-        hist = []
-        for pos in positions:
-            pos_row = self.snapshots.iloc[pos]
-            pos_key = (int(pos_row["iso_year"]), int(pos_row["iso_week"]))
-            if pos_key <= cutoff:
-                hist.append(pos)
-        return hist[-self.max_seq_len :]
+        rank = int(self._position_rank[idx])
+        start = max(0, rank + 1 - self.max_seq_len)
+        return positions[start : rank + 1]
 
     def __len__(self) -> int:
         return len(self.snapshots)
@@ -126,7 +127,7 @@ class ROSCutoffSequenceDataset(Dataset):
             dtype=np.float32,
         )
         mask = np.zeros(self.max_seq_len, dtype=bool)
-        hist_arr = self.sequence_features.iloc[hist].to_numpy(dtype=np.float32)
+        hist_arr = self.sequence_features[hist]
         n = len(hist_arr)
         seq[:n] = hist_arr
         mask[:n] = True
@@ -145,7 +146,7 @@ class ROSCutoffSequenceDataset(Dataset):
             "seq_mask": torch.from_numpy(mask),
             "blend_features": torch.from_numpy(blend.astype(np.float32)),
             "phase2_x": torch.from_numpy(
-                self.phase2_features.iloc[idx].to_numpy(dtype=np.float32).copy()
+                self.phase2_features[idx].copy()
             ),
             "target": torch.from_numpy(self.targets[idx]),
             "pa_target": torch.from_numpy(self.pa_target[idx]),

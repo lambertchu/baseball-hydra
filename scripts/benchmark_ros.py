@@ -254,6 +254,11 @@ def _load_phase3_config(
     return cfg
 
 
+def _force_train_only_splits(config: dict, train_end_season: int) -> None:
+    """Replace split config with train-only boundaries for full-history retrains."""
+    config["splits"] = {"train_end_season": int(train_end_season)}
+
+
 def _phase2_training_snapshots_for_year(
     eval_year: int,
     raw_dir: Path,
@@ -326,10 +331,7 @@ def _load_or_train_phase2_ensemble(
 
     # Force splits to treat everything as training — we don't run an internal
     # val carve-out during the benchmark (saves an expensive epoch loop).
-    phase2_config.setdefault("splits", {})
-    phase2_config["splits"] = {
-        "train_end_season": int(eval_year - 1),
-    }
+    _force_train_only_splits(phase2_config, eval_year - 1)
     logger.info(
         "  Training Phase 2 ensemble for eval_year=%d on %d snapshot rows "
         "(train_end_season=%d)",
@@ -413,8 +415,7 @@ def _load_or_train_phase3_ensemble(
         else None
     )
     phase3_config = dict(phase3_config)
-    phase3_config.setdefault("splits", {})
-    phase3_config["splits"] = {"train_end_season": int(eval_year - 1)}
+    _force_train_only_splits(phase3_config, eval_year - 1)
     logger.info(
         "  Training Phase 3 ensemble for eval_year=%d on %d snapshot rows",
         eval_year,
