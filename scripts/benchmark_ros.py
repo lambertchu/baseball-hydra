@@ -1033,6 +1033,7 @@ def save_benchmark_outputs(
     pooled: dict[int, dict],
     output_dir: Path,
     pit_plot: bool = False,
+    quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1081,7 +1082,7 @@ def save_benchmark_outputs(
     # Optional PIT plots per baseline that emitted quantile arrays. We pool
     # rows across thresholds so each plot has the full n for its system.
     if pit_plot:
-        _save_pit_plots(pooled, output_dir)
+        _save_pit_plots(pooled, output_dir, quantile_taus=quantile_taus)
 
     rows: list[dict] = []
     for t in sorted(pooled):
@@ -1388,6 +1389,20 @@ def main() -> None:
                     year, df_featured
                 )
 
+    # The Phase 2 ensemble emits quantiles aligned with ``model.taus`` from the
+    # config. Shrinkage's Beta-CDF quantiles are requested at the same grid via
+    # ``evaluate_checkpoint``'s ``quantile_taus`` argument. Scoring
+    # (``quantile_loss``/``pit_coverage``) asserts the tau count matches the
+    # prediction tensor, so we derive a single tau grid from the config up
+    # front and thread it through every scoring call. Without this, overriding
+    # ``model.taus`` in ``configs/mtl_ros.yaml`` crashes the benchmark at
+    # scoring time even though training/prediction succeed.
+    quantile_taus: Sequence[float] = DEFAULT_QUANTILE_LEVELS
+    if phase2_config is not None:
+        configured = phase2_config.get("model", {}).get("taus")
+        if configured:
+            quantile_taus = tuple(float(t) for t in configured)
+
     year_results: list[dict] = []
     for year in years:
         logger.info("=" * 60)
@@ -1405,12 +1420,19 @@ def main() -> None:
             phase2_ensemble=phase2_by_year.get(year),
             phase2_config=phase2_config,
             phase2_preseason=phase2_preseason_by_year.get(year),
+            quantile_taus=quantile_taus,
         )
         year_results.append(result)
 
-    pooled = pool_by_threshold(year_results)
+    pooled = pool_by_threshold(year_results, quantile_taus=quantile_taus)
     print_benchmark_results(year_results, pooled)
-    save_benchmark_outputs(year_results, pooled, output_dir, pit_plot=args.pit_plot)
+    save_benchmark_outputs(
+        year_results,
+        pooled,
+        output_dir,
+        pit_plot=args.pit_plot,
+        quantile_taus=quantile_taus,
+    )
 
     logger.info("ROS benchmark complete.")
 
