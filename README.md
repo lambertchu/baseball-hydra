@@ -2,15 +2,18 @@
 
 **An MLB projection system built using a multi-task learning (MTL) neural network**
 
-Baseball Hydra predicts next-season batter stats — OBP, SLG, HR, R, RBI, and SB — by training a multi-task learning (MTL) neural network on a decade of historical performance, Statcast batted-ball data, sprint and bat speed metrics, ballpark factors, and team context. The codebase was developed using Claude Code.
+Baseball Hydra predicts batter stats — OBP, SLG, HR, R, RBI, and SB — in two flavors:
 
-[Here's the link](https://lambertchu.com/blog/vibe-coding-baseball) to my blog post describing my process of building this model.
+1. **Preseason (full-season)** — a multi-task learning (MTL) neural network trained on a decade of FanGraphs + Statcast + Baseball Savant data, benchmarked against ZiPS and Steamer over 1,063 player-seasons (2022-2025).
+2. **In-season rest-of-season (ROS)** — a closed-form Beta-Binomial shrinkage baseline that blends the preseason MTL prior with year-to-date counts from a weekly BRef + Statcast snapshot pipeline, evaluated at 50/100/200/400 PA checkpoints across 2023-2025.
+
+The codebase was developed using Claude Code. [Here's the link](https://lambertchu.com/blog/vibe-coding-baseball) to my blog post describing my process of building this model.
 
 ### Why multi-task learning?
 
 Traditional projection systems model each stat independently. MTL trains a single neural network with a shared backbone that feeds into stat-specific prediction heads, so the model learns cross-stat relationships automatically: exit velocity informs HR projections, sprint speed shapes SB predictions, and OBP context flows into R and RBI estimates. The result is a model where improving one prediction can improve them all.
 
-### How it stacks up
+### How the preseason MTL stacks up
 
 Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
 
@@ -22,6 +25,19 @@ Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
 | Last season | 0.0352 | 0.0726 | 8.65 | 22.37 | 23.23 | 7.35 | 10.284    |
 
 **2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RMSE, with the largest gains on counting stats (R and RBI).
+
+### How the ROS pipeline stacks up
+
+Pooled mean RMSE across 2023-2025 weekly snapshots at each PA checkpoint:
+
+| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 (parked) |
+| ------------- | ---------- | --------- | ----------- | -------------------- | --------------- |
+| 50            | 0.0591     | 0.0309    | 0.0313      | **0.0303**           | 0.0314          |
+| 100           | 0.0481     | 0.0312    | 0.0322      | **0.0307**           | 0.0321          |
+| 200           | 0.0418     | 0.0340    | 0.0346      | **0.0332**           | 0.0348          |
+| 400           | 0.0414     | 0.0386    | 0.0387      | **0.0376**           | 0.0401          |
+
+The closed-form Bayesian shrinkage baseline wins every PA checkpoint. An experimental Phase 2 quantile-head MTL (`src/models/mtl_ros/`) is fully implemented, tested, and benchmarked but underperforms shrinkage by ~4-5% — most likely due to weekly snapshot data being backfilled only for 2023-2025 (~27k cutoff rows). The Phase 2 code stays in-tree for a future retry once 2016-2022 snapshots are backfilled.
 
 ## Prerequisites
 
@@ -60,8 +76,13 @@ uv run python -m src.data.build_snapshots --seasons 2016-2026   # Weekly snapsho
 
 # Step 8 (optional): ROS benchmark at PA checkpoints (50 / 100 / 200 / 400)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025                           # persist_observed baseline (no retraining)
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                 # + frozen_preseason, marcel_blend, shrinkage (retrains MTL per year)
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                 # + frozen_preseason, marcel_blend, shrinkage, phase2 (retrains preseason MTL + Phase 2 ensemble per year)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau       # fit per-stat τ₀ via leave-one-year-out cross-fitting
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --pit-plot      # + PIT histograms for shrinkage & phase2
+
+# Step 9 (optional): Phase 2 ROS quantile MTL — train and generate current-year projections
+uv run python -m src.models.mtl_ros.train --config configs/mtl_ros.yaml                 # train + eval on 2023/2024 snapshots
+uv run python scripts/generate_ros_projections.py --year 2026                           # 2026 ROS projections → data/projections/ros_mtl_2026.csv
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -78,7 +99,7 @@ the naive persistence baseline (Y+1 = Y).
 - **Team stats**: team offensive environment for lineup context
 - **Public projections**: Steamer, ZiPS, The Bat, The Bat X (comparison only, not used in training). Current-year projections can be fetched via the FanGraphs API. Historical projections must be downloaded manually from [FanGraphs Projections](https://www.fangraphs.com/projections) and require a paid FanGraphs membership.
 
-## Feature Pipeline (138 registered, ~121 active after exclusions)
+## Feature Pipeline (162 registered; ~121 active for preseason after exclusions)
 
 | Group            | Features                                                                                                                                                                                                                | Count        |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
@@ -91,8 +112,9 @@ the naive persistence baseline (Y+1 = Y).
 | **Park Factors** | park_factor_runs, park_factor_hr                                                                                                                                                                                        | 2            |
 | **Team Stats**   | team_runs_per_game, team_ops, team_sb, sb_rule_era, sb_era_x_speed, speed_age_interaction, team_sb_per_game, sb_era_x_attempt_rate                                                                                      | 8            |
 | **Temporal**     | prev_year/weighted_avg/trend for 6 targets + 3 xStats + 6 per-PA rates                                                                                                                                                  | 45           |
+| **In-Season** (Phase 2, opt-in) | 10 ytd passthroughs (pa/obp/slg/hr_per_pa/r_per_pa/rbi_per_pa/sb_per_pa/iso/bb_rate/k_rate) + 10 trail4w rates + week_index + pa_fraction + 2 IL stubs                                                | 24           |
 
-Feature groups and exclusions are config-driven via `configs/data.yaml`. Redundant features (hard_hit_rate, sweet_spot_rate, bat speed indicators pre-2024) and aging delta features (hurt benchmark RMSE per ablation testing) are excluded by default.
+Feature groups and exclusions are config-driven via `configs/data.yaml` (preseason) and `configs/mtl_ros.yaml` (ROS). Redundant features (hard_hit_rate, sweet_spot_rate, bat speed indicators pre-2024) and aging delta features (hurt benchmark RMSE per ablation testing) are excluded by default. The **In-Season** group is opt-in — it's only enabled by the Phase 2 ROS training path.
 
 ## Data Directory Layout
 
@@ -116,10 +138,11 @@ data/
 │   ├── zips_{year}.csv
 │   ├── thebat_{year}.csv
 │   └── thebatx_{year}.csv
-├── merged_batter_data.parquet     # Merged modeling dataset (from merge)
+├── merged_batter_data.parquet     # Merged preseason modeling dataset (from merge)
 ├── models/
-│   └── mtl/
-│       └── mtl_forecaster.pt        # MTL checkpoint
+│   ├── mtl/
+│   │   └── mtl_forecaster.pt            # Preseason MTL checkpoint
+│   └── mtl_ros_quantile/                # Phase 2 ROS MTL checkpoints
 ├── reports/
 │   ├── mtl_report.json
 │   ├── mtl_backtest_report.json
@@ -130,10 +153,12 @@ data/
 │   └── benchmark_ros/             # Rolling ROS benchmark at PA checkpoints
 │       ├── benchmark_ros_report.json
 │       ├── benchmark_ros_table.csv
-│       └── preseason/             # Per-year MTL preseason prediction cache
-└── projections/                   # Our model projections
+│       ├── preseason/             # Per-year preseason MTL prediction cache
+│       └── phase2/                # Per-year Phase 2 ensemble checkpoints
+└── projections/                   # Preseason + ROS projections
     ├── projections_mtl_2026.csv
-    └── projections_vs_external_2026.csv  # Our model vs public projections
+    ├── projections_vs_external_2026.csv  # Preseason vs public projections
+    └── ros_mtl_2026.csv                   # Phase 2 ROS projections (median + p05/p95)
 ```
 
 ## Evaluation
@@ -146,12 +171,14 @@ Implemented in `src/eval/`:
 - Calibration scatter plots (predicted vs actual)
 - Residual distribution histograms
 - MTL training curves (loss + validation RMSE)
+- Marcel PA projection + rate_to_count helper (`src/eval/pa_projection.py`)
 - **ROS metrics** (`src/eval/ros_metrics.py`): pinball quantile loss, PIT coverage for calibration, per-player PA-checkpoint row selection — used by the ROS benchmark script
-- **Shrinkage baseline** (`src/models/baselines/shrinkage.py`): closed-form Beta-Binomial posterior per stat (OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA) with per-stat pseudocount τ₀ tuned on held-out checkpoints
+- **Shrinkage baseline** (`src/models/baselines/shrinkage.py`): closed-form Beta-Binomial posterior per stat (OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA) with per-stat pseudocount τ₀ (stabilisation-based defaults or fit via leave-one-year-out cross-fitting); emits both posterior means and Beta-CDF quantiles for pinball/PIT
+- **Phase 2 MTL ROS** (`src/models/mtl_ros/`): quantile-regressing MTL with a 7th PA-remaining head, pinball + Kendall uncertainty weighting, multi-seed ensemble with monotonic quantile sort
 
 ## Project Structure
 
-See [CLAUDE.md](CLAUDE.md) for the full engineering plan, data contract, and feature specification.
+See [AGENTS.md](AGENTS.md) (also available as [CLAUDE.md](CLAUDE.md) via symlink) for the full engineering plan, data contract, and feature specification.
 
 ## Running Tests
 
