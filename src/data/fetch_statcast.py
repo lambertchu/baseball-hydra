@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import date as _date
 from pathlib import Path
 
 import numpy as np
@@ -25,18 +26,42 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Season date ranges for Statcast queries (regular season + postseason).
+# MLB regular-season date ranges (opening day → final regular-season game).
+# These intentionally EXCLUDE the postseason — Wild Card / Division /
+# Championship / World Series contamination was producing inflated ytd
+# counts for playoff teams and leaking postseason games into the weekly
+# snapshot pipeline's ROS targets.
+#
+# Statcast's ``fetch_statcast`` pipeline also filters on ``game_type == 'R'``
+# in ``_filter_bbe``, but BRef's ``batting_stats_range`` endpoint used by
+# ``fetch_game_logs`` does not — so clamping the date window here is the
+# only robust guard against postseason bleed-through for the in-season
+# pipeline.
+#
+# For the in-progress season, the end date is derived from ``date.today()``
+# at import time so fetchers never hit future-dated empty ranges on BRef /
+# Statcast, and refreshes automatically pull new weeks as they complete.
+# A conservative upper cap (late September) guards against postseason
+# bleed-through if the module is re-imported after the regular season ends
+# without the entry being updated to a concrete end date.
+_CURRENT_SEASON: int = 2026
+_CURRENT_SEASON_REG_END_CAP: str = "2026-09-27"
+_IN_PROGRESS_SEASON_END: str = min(
+    _date.today().isoformat(), _CURRENT_SEASON_REG_END_CAP
+)
+
 _SEASON_DATES: dict[int, tuple[str, str]] = {
-    2016: ("2016-04-03", "2016-11-03"),
-    2017: ("2017-04-02", "2017-11-02"),
-    2018: ("2018-03-29", "2018-10-29"),
-    2019: ("2019-03-28", "2019-10-31"),
-    2020: ("2020-07-23", "2020-10-28"),
-    2021: ("2021-04-01", "2021-11-03"),
-    2022: ("2022-04-07", "2022-11-06"),
-    2023: ("2023-03-30", "2023-11-02"),
-    2024: ("2024-03-20", "2024-10-31"),
-    2025: ("2025-03-27", "2025-10-31"),
+    2016: ("2016-04-03", "2016-10-02"),
+    2017: ("2017-04-02", "2017-10-01"),
+    2018: ("2018-03-29", "2018-10-01"),
+    2019: ("2019-03-28", "2019-09-29"),
+    2020: ("2020-07-23", "2020-09-27"),
+    2021: ("2021-04-01", "2021-10-03"),
+    2022: ("2022-04-07", "2022-10-05"),
+    2023: ("2023-03-30", "2023-10-01"),
+    2024: ("2024-03-20", "2024-09-29"),
+    2025: ("2025-03-27", "2025-09-28"),
+    _CURRENT_SEASON: ("2026-03-26", _IN_PROGRESS_SEASON_END),
 }
 
 

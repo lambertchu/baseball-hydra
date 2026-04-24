@@ -18,6 +18,7 @@ import pytest
 from src.eval.plots import (
     plot_calibration_scatter,
     plot_model_comparison_bars,
+    plot_pit_histogram,
     plot_residual_distributions,
     plot_training_curves,
     save_figure,
@@ -200,6 +201,34 @@ class TestPlotFunctions:
         ax.plot([0, 1], [0, 1])
         out = save_figure(fig, tmp_path / "sub" / "dir" / "test.png")
         assert out.exists()
+
+    def test_plot_pit_histogram_creates_file(self, tmp_path):
+        rng = np.random.default_rng(0)
+        n = 200
+        n_targets = 6
+        taus = [0.05, 0.25, 0.50, 0.75, 0.95]
+        target_names = ["OBP", "SLG", "HR/PA", "R/PA", "RBI/PA", "SB/PA"]
+
+        # Synthetic but roughly well-calibrated: each tau q_i is the sample
+        # quantile across rows, broadcast to all rows.
+        y_true = rng.uniform(0.2, 0.5, size=(n, n_targets))
+        quant_vals = np.quantile(y_true, taus, axis=0).T  # (n_targets, n_taus)
+        y_quant = np.broadcast_to(quant_vals[None, :, :], (n, n_targets, len(taus))).copy()
+
+        out_path = tmp_path / "pit_test.png"
+        returned = plot_pit_histogram(y_true, y_quant, taus, target_names, out_path)
+        assert returned == out_path
+        assert out_path.exists()
+        assert out_path.stat().st_size > 0
+
+    def test_plot_pit_histogram_shape_validation(self, tmp_path):
+        # Mismatched tau count vs quantile axis should raise.
+        y_true = np.zeros((5, 2))
+        y_quant = np.zeros((5, 2, 3))
+        with pytest.raises(ValueError, match="3 quantiles but 2 taus"):
+            plot_pit_histogram(
+                y_true, y_quant, [0.25, 0.75], ["A", "B"], tmp_path / "bad.png",
+            )
 
 
 # ---------------------------------------------------------------------------

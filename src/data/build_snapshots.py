@@ -28,10 +28,11 @@ import argparse
 import logging
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from src.data.fetch_statcast import _parse_season_tokens, fetch_statcast_weekly
+from src.data.rate_helpers import obp_slg as _obp_slg
+from src.data.rate_helpers import safe_div as _safe_div
 
 logger = logging.getLogger(__name__)
 
@@ -39,39 +40,101 @@ _GROUP_KEYS = ["mlbam_id", "season"]
 _SORT_KEYS = ["mlbam_id", "season", "iso_year", "iso_week"]
 
 _WEEK_COUNTS: tuple[str, ...] = (
-    "pa", "ab", "h", "singles", "doubles", "triples", "hr",
-    "r", "rbi", "bb", "ibb", "so", "hbp", "sf", "sh", "sb", "cs",
+    "pa",
+    "ab",
+    "h",
+    "singles",
+    "doubles",
+    "triples",
+    "hr",
+    "r",
+    "rbi",
+    "bb",
+    "ibb",
+    "so",
+    "hbp",
+    "sf",
+    "sh",
+    "sb",
+    "cs",
 )
 
 _STATCAST_RATE_COLS: tuple[str, ...] = (
-    "avg_exit_velocity", "avg_launch_angle",
+    "avg_exit_velocity",
+    "avg_launch_angle",
     "estimated_woba_using_speedangle",
     "estimated_ba_using_speedangle",
     "estimated_slg_using_speedangle",
-    "barrel_rate", "hard_hit_rate", "sweet_spot_rate",
+    "barrel_rate",
+    "hard_hit_rate",
+    "sweet_spot_rate",
 )
-
-
-def _safe_div(num: pd.Series, den: pd.Series) -> pd.Series:
-    """Elementwise division, returning NaN where the denominator is 0 or NaN."""
-    n = num.to_numpy(dtype=float, copy=False)
-    d = den.to_numpy(dtype=float, copy=False)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        result = np.where(d > 0, n / d, np.nan)
-    return pd.Series(result, index=num.index)
 
 
 def _derive_singles(df: pd.DataFrame) -> pd.DataFrame:
     """Derive singles = h - doubles - triples - hr (BRef doesn't supply 1B)."""
     required = {"h", "doubles", "triples", "hr"}
     if not required.issubset(df.columns):
-        raise KeyError(f"Cannot derive singles; missing columns: {required - set(df.columns)}")
+        raise KeyError(
+            f"Cannot derive singles; missing columns: {required - set(df.columns)}"
+        )
     out = df.copy()
     out["singles"] = (
-        out["h"].fillna(0) - out["doubles"].fillna(0)
-        - out["triples"].fillna(0) - out["hr"].fillna(0)
-    ).clip(lower=0).astype(int)
+        (
+            out["h"].fillna(0)
+            - out["doubles"].fillna(0)
+            - out["triples"].fillna(0)
+            - out["hr"].fillna(0)
+        )
+        .clip(lower=0)
+        .astype(int)
+    )
     return out
+
+
+def _collapse_duplicate_weekly_rows(
+    batting_wk: pd.DataFrame,
+    key_cols: list[str],
+) -> pd.DataFrame:
+    """Aggregate duplicate ``(mlbam_id, iso_year, iso_week)`` rows to one.
+
+    BRef's ``batting_stats_range`` can emit multiple rows for the same
+    ``(player, week)`` when a player was on multiple teams that week
+    (mid-week trade, September call-up). Those rows carry per-team counting
+    stats; to keep the downstream ``one_to_one`` merge validation honest we
+    sum the counting columns and keep the first non-null value for the rest.
+    """
+    if batting_wk.empty:
+        return batting_wk
+    dup_mask = batting_wk.duplicated(subset=key_cols, keep=False)
+    if not dup_mask.any():
+        return batting_wk
+
+    logger.info(
+        "Collapsing %d duplicate weekly rows across %d keys (likely mid-week "
+        "trades / call-ups)",
+        int(dup_mask.sum()),
+        int(batting_wk.loc[dup_mask, key_cols].drop_duplicates().shape[0]),
+    )
+
+    # Partition columns: sum the additive counts, keep-first for everything else.
+    sum_cols = [c for c in _WEEK_COUNTS if c in batting_wk.columns]
+    # "singles" is derived upstream; include it in the sum when present so
+    # traded-player weeks roll up correctly.
+    if "singles" in batting_wk.columns and "singles" not in sum_cols:
+        sum_cols.append("singles")
+    other_cols = [
+        c for c in batting_wk.columns if c not in key_cols and c not in sum_cols
+    ]
+    agg_map: dict[str, str] = {c: "sum" for c in sum_cols}
+    agg_map.update({c: "first" for c in other_cols})
+    collapsed = (
+        batting_wk.groupby(key_cols, dropna=False, sort=False)
+        .agg(agg_map)
+        .reset_index()
+    )
+    # Restore the original column order for downstream callers that rely on it.
+    return collapsed[[c for c in batting_wk.columns if c in collapsed.columns]]
 
 
 def _merge_weekly_sources(
@@ -86,12 +149,20 @@ def _merge_weekly_sources(
     batting_wk = batting_wk.dropna(subset=["mlbam_id"]).copy()
     batting_wk["mlbam_id"] = batting_wk["mlbam_id"].astype("int64")
 
+    # BRef emits per-team rows when a player is traded mid-week; collapse
+    # them so the one_to_one merge below is valid.
+    batting_wk = _collapse_duplicate_weekly_rows(
+        batting_wk, key_cols=["mlbam_id", "iso_year", "iso_week"]
+    )
+
     statcast_wk = statcast_wk.copy()
     statcast_wk["mlbam_id"] = statcast_wk["mlbam_id"].astype("int64")
     # Drop columns the batting side already provides (BRef values are canonical).
     # Statcast's `week_start_date` is the first-game date in the week, not Monday.
     redundant = ("season", "week_start_date", "week_end_date")
-    statcast_wk = statcast_wk.drop(columns=[c for c in redundant if c in statcast_wk.columns])
+    statcast_wk = statcast_wk.drop(
+        columns=[c for c in redundant if c in statcast_wk.columns]
+    )
 
     return batting_wk.merge(
         statcast_wk,
@@ -127,7 +198,9 @@ def _apply_count_ytd_trail_ros(df: pd.DataFrame, window: int = 4) -> pd.DataFram
         cumsums = grouped[count_cols].cumsum()
         totals = grouped[count_cols].transform("sum")
         rolls = (
-            grouped[count_cols].rolling(window, min_periods=1).sum()
+            grouped[count_cols]
+            .rolling(window, min_periods=1)
+            .sum()
             .reset_index(level=_GROUP_KEYS, drop=True)
         )
         for stat in _WEEK_COUNTS:
@@ -141,7 +214,9 @@ def _apply_count_ytd_trail_ros(df: pd.DataFrame, window: int = 4) -> pd.DataFram
     if "bbe_count_week" in df.columns:
         df["bbe_count_ytd"] = grouped["bbe_count_week"].cumsum()
         df[f"trail{window}w_bbe_count"] = (
-            grouped["bbe_count_week"].rolling(window, min_periods=1).sum()
+            grouped["bbe_count_week"]
+            .rolling(window, min_periods=1)
+            .sum()
             .reset_index(level=_GROUP_KEYS, drop=True)
         )
 
@@ -168,28 +243,23 @@ def _apply_count_ytd_trail_ros(df: pd.DataFrame, window: int = 4) -> pd.DataFram
     return df
 
 
-def _obp_slg(
-    h: pd.Series, bb: pd.Series, hbp: pd.Series, sf: pd.Series,
-    singles: pd.Series, doubles: pd.Series, triples: pd.Series, hr: pd.Series,
-    ab: pd.Series,
-) -> tuple[pd.Series, pd.Series]:
-    """Return (OBP, SLG) from count components. Components may contain NaN."""
-    obp_den = ab.fillna(0) + bb.fillna(0) + hbp.fillna(0) + sf.fillna(0)
-    obp = _safe_div(h.fillna(0) + bb.fillna(0) + hbp.fillna(0), obp_den)
-    tb = singles.fillna(0) + 2 * doubles.fillna(0) + 3 * triples.fillna(0) + 4 * hr.fillna(0)
-    slg = _safe_div(tb, ab)
-    return obp, slg
-
-
 def _add_ytd_rates(df: pd.DataFrame) -> pd.DataFrame:
     """Add derived ytd rate stats (OBP, SLG, per-PA rates, ISO, discipline)."""
+
     def col(stat: str) -> pd.Series:
         return df.get(f"{stat}_ytd", pd.Series(index=df.index, dtype=float))
 
     pa, ab, h, so = col("pa"), col("ab"), col("h"), col("so")
     df["obp_ytd"], df["slg_ytd"] = _obp_slg(
-        h, col("bb"), col("hbp"), col("sf"),
-        col("singles"), col("doubles"), col("triples"), col("hr"), ab,
+        h,
+        col("bb"),
+        col("hbp"),
+        col("sf"),
+        col("singles"),
+        col("doubles"),
+        col("triples"),
+        col("hr"),
+        ab,
     )
     for stat in ("hr", "r", "rbi", "sb", "cs"):
         if f"{stat}_ytd" in df.columns:
@@ -211,8 +281,15 @@ def _add_ros_rates(df: pd.DataFrame) -> pd.DataFrame:
         return df.get(f"ros_{stat}", pd.Series(index=df.index, dtype=float))
 
     df["ros_obp"], df["ros_slg"] = _obp_slg(
-        col("h"), col("bb"), col("hbp"), col("sf"),
-        col("singles"), col("doubles"), col("triples"), col("hr"), col("ab"),
+        col("h"),
+        col("bb"),
+        col("hbp"),
+        col("sf"),
+        col("singles"),
+        col("doubles"),
+        col("triples"),
+        col("hr"),
+        col("ab"),
     )
     for stat in ("hr", "r", "rbi", "sb"):
         if f"ros_{stat}" in df.columns:
@@ -254,7 +331,9 @@ def build_weekly_snapshots(
     statcast_path = raw_dir / f"statcast_agg_week_{year}.parquet"
     raw_statcast_path = raw_dir / f"statcast_raw_{year}.parquet"
     if not statcast_path.exists() and raw_statcast_path.exists():
-        logger.info("No weekly Statcast aggregate at %s — building from raw", statcast_path)
+        logger.info(
+            "No weekly Statcast aggregate at %s — building from raw", statcast_path
+        )
         fetch_statcast_weekly(year, out_dir=raw_dir)
 
     if statcast_path.exists():
@@ -263,7 +342,9 @@ def build_weekly_snapshots(
         logger.warning(
             "No weekly Statcast file at %s and no raw cache — snapshot "
             "will have no quality metrics. Fetch with: "
-            "python -m src.data.fetch_raw_statcast --seasons %d", statcast_path, year,
+            "python -m src.data.fetch_raw_statcast --seasons %d",
+            statcast_path,
+            year,
         )
         statcast_wk = pd.DataFrame(columns=["mlbam_id", "iso_year", "iso_week"])
 
@@ -298,7 +379,10 @@ def main() -> None:
         description="Build per-(player, ISO-week) snapshots for one or more seasons.",
     )
     parser.add_argument(
-        "--seasons", nargs="+", required=True, metavar="YEAR",
+        "--seasons",
+        nargs="+",
+        required=True,
+        metavar="YEAR",
         help="Season(s) to build: individual years or a range (e.g. 2023-2025)",
     )
     parser.add_argument("--raw-dir", default="data/raw")

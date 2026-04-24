@@ -425,6 +425,54 @@ class TestLoadWeeklySnapshots:
 # ---------------------------------------------------------------------------
 
 
+class TestPreseasonMultiSeasonAlignment:
+    """The (id, season) join must attach each row's correct-year prior.
+
+    The previous id-only join collapsed multi-season preseason caches onto
+    the first-season row per player and then reindexed on ids — so a 2024
+    checkpoint row could receive a 2023 prior.
+    """
+
+    def test_multi_season_frames_attach_correct_year(self):
+        # Same player in two seasons with deliberately different priors.
+        # If the join ignores season, both checkpoint rows get the 2023 prior.
+        rows = pd.DataFrame(
+            [
+                {**_make_checkpoint_rows(1, season=2023).iloc[0].to_dict()},
+                {**_make_checkpoint_rows(1, season=2024).iloc[0].to_dict()},
+            ]
+        )
+        preseason = pd.DataFrame(
+            [
+                {
+                    "mlbam_id": 100,
+                    "season": 2023,
+                    "target_obp": 0.300,
+                    "target_slg": 0.400,
+                    "target_hr": 0.03,
+                    "target_r": 0.11,
+                    "target_rbi": 0.12,
+                    "target_sb": 0.01,
+                },
+                {
+                    "mlbam_id": 100,
+                    "season": 2024,
+                    "target_obp": 0.360,
+                    "target_slg": 0.480,
+                    "target_hr": 0.06,
+                    "target_r": 0.14,
+                    "target_rbi": 0.15,
+                    "target_sb": 0.04,
+                },
+            ]
+        )
+        preds = br.predict_frozen_preseason(rows, preseason)
+        assert preds is not None
+        # 2023 row must get the 2023 prior (0.300), 2024 row must get 0.360.
+        assert preds.iloc[0]["ros_obp"] == pytest.approx(0.300)
+        assert preds.iloc[1]["ros_obp"] == pytest.approx(0.360)
+
+
 class TestPreseasonCache:
     def test_loads_existing_cache(self, tmp_path):
         preseason = _make_preseason_cache()
@@ -474,3 +522,118 @@ class TestPreseasonCache:
                 data_config=None,
                 retrain=True,
             )
+
+
+class TestPhase2CacheMiss:
+    """Phase 2 ensemble must SKIP (return None) on cache miss unless
+    ``--retrain`` is explicitly passed. Otherwise a user who kept phase2 in
+    the default ``--include`` list would silently kick off an expensive
+    training run.
+    """
+
+    def test_cache_miss_without_retrain_returns_none(self, tmp_path):
+        result = br._load_or_train_phase2_ensemble(
+            eval_year=2024,
+            phase2_cache_dir=tmp_path,
+            phase2_config={},
+            raw_dir=tmp_path,
+            df_featured=None,
+            retrain=False,
+        )
+        assert result is None
+
+    def test_phase2_eval_preseason_filters_to_year(self):
+        df_featured = pd.DataFrame(
+            {
+                "mlbam_id": [100, 100, 200],
+                "season": [2023, 2024, 2024],
+                "age": [28, 29, 30],
+            }
+        )
+        frame = br._phase2_eval_preseason_frame(2024, df_featured)
+        assert frame is not None
+        assert set(frame["season"]) == {2024}
+        assert len(frame) == 2
+
+    def test_phase2_eval_preseason_empty_returns_none(self):
+        df_featured = pd.DataFrame(
+            {"mlbam_id": [100], "season": [2023], "age": [28]}
+        )
+        # No rows for 2024 → None.
+        assert br._phase2_eval_preseason_frame(2024, df_featured) is None
+
+    def test_phase2_eval_preseason_none_passthrough(self):
+        assert br._phase2_eval_preseason_frame(2024, None) is None
+
+
+class TestPhase2FillWithTrainMean:
+    """Missing features at predict time must be filled with the training
+    feature mean, so after standardization they map to 0 (neutral) rather
+    than an extreme ``-mean/std`` value.
+    """
+
+    def test_fill_missing_with_train_mean(self):
+        # Stub ensemble whose first seed has a fitted scaler.
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        # 3 features — mean = [10.0, 20.0, 30.0]
+        arr = np.array(
+            [
+                [10.0, 20.0, 30.0],
+                [10.0, 20.0, 30.0],
+            ]
+        )
+        scaler.fit(arr)
+
+        # Build a minimal stub whose attrs match the predict-time
+        # contract: forecasters_[0] has feature_scaler_ and feature_names_.
+        class _StubForecaster:
+            def __init__(self) -> None:
+                self.feature_scaler_ = scaler
+                self.feature_names_ = ["a", "b", "c"]
+
+        class _StubEnsemble:
+            def __init__(self) -> None:
+                self.forecasters_ = [_StubForecaster()]
+
+        ensemble = _StubEnsemble()
+        X = pd.DataFrame({"a": [np.nan, 5.0], "b": [np.nan, 22.0], "c": [np.nan, 31.0]})
+        br._fill_with_train_mean(X, ensemble, ["a", "b", "c"])
+        # Row 0 should now carry the training means.
+        assert float(X.iloc[0]["a"]) == pytest.approx(10.0)
+        assert float(X.iloc[0]["b"]) == pytest.approx(20.0)
+        assert float(X.iloc[0]["c"]) == pytest.approx(30.0)
+        # Row 1 is unchanged.
+        assert float(X.iloc[1]["a"]) == pytest.approx(5.0)
+
+    def test_fill_falls_back_to_zero_without_scaler(self):
+        # No forecasters → no scaler; behavior matches legacy fillna(0).
+        class _Empty:
+            forecasters_ = []
+
+        X = pd.DataFrame({"a": [np.nan, 1.0]})
+        br._fill_with_train_mean(X, _Empty(), ["a"])
+        assert float(X.iloc[0]["a"]) == 0.0
+
+
+class TestMtlRosConfigDefaults:
+    """The shipped configs/mtl_ros.yaml must not enable the leaky
+    ``team_stats`` preseason group by default (end-of-season totals would
+    leak into in-season rows).
+    """
+
+    def test_team_stats_disabled_in_default_config(self):
+        import yaml
+
+        config_path = (
+            Path(__file__).resolve().parents[1] / "configs" / "mtl_ros.yaml"
+        )
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        groups = config.get("data", {}).get("preseason_feature_groups", {})
+        assert groups.get("team_stats") is False, (
+            "team_stats must remain disabled in the default config until an "
+            "in-season team aggregate exists; current value: "
+            f"{groups.get('team_stats')}"
+        )

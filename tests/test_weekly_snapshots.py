@@ -531,6 +531,71 @@ class TestMergeDedup:
         assert merged["week_start_date"].iloc[0] == pd.Timestamp("2024-04-08")
 
 
+class TestMidWeekTradeDedup:
+    """BRef emits one row per team for a mid-week trade. The weekly merge
+    must collapse those into a single row (summing counts) instead of
+    crashing the ``one_to_one`` validation.
+    """
+
+    def test_duplicate_keys_get_aggregated(self):
+        # Player 100 appears twice for week 15 — pre-trade (NYY) and post-trade (BOS).
+        batting = pd.DataFrame({
+            "mlbam_id": [100, 100, 200],
+            "iso_year": [2024, 2024, 2024],
+            "iso_week": [15, 15, 15],
+            "team": ["NYY", "BOS", "CHC"],
+            "week_start_date": [pd.Timestamp("2024-04-08")] * 3,
+            "week_end_date": [pd.Timestamp("2024-04-14")] * 3,
+            "season": [2024, 2024, 2024],
+            "pa": [10, 15, 20],
+            "ab": [9, 13, 18],
+            "hr": [1, 0, 2],
+            "bb": [1, 2, 2],
+            "h": [3, 4, 6],
+        })
+        statcast = pd.DataFrame({
+            "mlbam_id": [100, 200],
+            "iso_year": [2024, 2024],
+            "iso_week": [15, 15],
+            "bbe_count": [5, 8],
+            "avg_exit_velocity": [92.0, 88.0],
+        })
+        merged = _merge_weekly_sources(batting, statcast)
+        # One row per (mlbam_id, iso_year, iso_week)
+        assert len(merged) == 2
+        player_100 = merged[merged["mlbam_id"] == 100].iloc[0]
+        # Counts summed across the two teams (10 + 15 = 25 PA, etc.)
+        assert player_100["pa"] == 25
+        assert player_100["ab"] == 22
+        assert player_100["hr"] == 1
+        assert player_100["bb"] == 3
+        assert player_100["h"] == 7
+
+    def test_no_duplicates_is_noop(self):
+        # Non-duplicate input should pass through unchanged (modulo
+        # the usual merge).
+        batting = pd.DataFrame({
+            "mlbam_id": [100, 200],
+            "iso_year": [2024, 2024],
+            "iso_week": [15, 15],
+            "pa": [20, 22],
+            "hr": [1, 0],
+            "season": [2024, 2024],
+            "week_start_date": [pd.Timestamp("2024-04-08")] * 2,
+            "week_end_date": [pd.Timestamp("2024-04-14")] * 2,
+        })
+        statcast = pd.DataFrame({
+            "mlbam_id": [100, 200],
+            "iso_year": [2024, 2024],
+            "iso_week": [15, 15],
+            "bbe_count": [5, 8],
+            "avg_exit_velocity": [92.0, 88.0],
+        })
+        merged = _merge_weekly_sources(batting, statcast)
+        assert len(merged) == 2
+        assert set(merged["mlbam_id"]) == {100, 200}
+
+
 class TestBbeValidMaskDenominator:
     """BBE-weighted YTD must not deflate when a week has BBEs but a NaN rate."""
 
@@ -580,6 +645,28 @@ class TestBbeValidMaskDenominator:
         assert ev_ytd[2] == pytest.approx(
             (10 * 92.0 + 8 * 91.0 + 12 * 93.0) / 30, rel=1e-6,
         )
+
+
+class TestSeasonDatesRegularSeasonOnly:
+    """``_SEASON_DATES`` must end on-or-before the real regular-season cutoff.
+
+    The in-season pipeline treats the season-window end date as the boundary
+    for ROS targets and ISO-week enumeration. Postseason dates would inflate
+    the ytd counts for playoff teams and bleed playoff games into ROS targets.
+    """
+
+    def test_end_dates_are_regular_season_only(self):
+        from src.data.fetch_statcast import _SEASON_DATES
+        from datetime import date
+
+        # Upper bound for regular-season end in any year: MLB has never
+        # extended regular season past early October.
+        for year, (_, end_s) in _SEASON_DATES.items():
+            end = date.fromisoformat(end_s)
+            # Every MLB regular season has ended on or before October 6th.
+            assert end.month <= 10, f"{year}: season end {end} is past October"
+            if end.month == 10:
+                assert end.day <= 6, f"{year}: {end} extends into postseason"
 
 
 class TestFetchGameLogsFailsHard:
