@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import date as _date
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,19 @@ logger = logging.getLogger(__name__)
 # ``fetch_game_logs`` does not — so clamping the date window here is the
 # only robust guard against postseason bleed-through for the in-season
 # pipeline.
+#
+# For the in-progress season, the end date is derived from ``date.today()``
+# at import time so fetchers never hit future-dated empty ranges on BRef /
+# Statcast, and refreshes automatically pull new weeks as they complete.
+# A conservative upper cap (late September) guards against postseason
+# bleed-through if the module is re-imported after the regular season ends
+# without the entry being updated to a concrete end date.
+_CURRENT_SEASON: int = 2026
+_CURRENT_SEASON_REG_END_CAP: str = "2026-09-27"
+_IN_PROGRESS_SEASON_END: str = min(
+    _date.today().isoformat(), _CURRENT_SEASON_REG_END_CAP
+)
+
 _SEASON_DATES: dict[int, tuple[str, str]] = {
     2016: ("2016-04-03", "2016-10-02"),
     2017: ("2017-04-02", "2017-10-01"),
@@ -47,10 +61,7 @@ _SEASON_DATES: dict[int, tuple[str, str]] = {
     2023: ("2023-03-30", "2023-10-01"),
     2024: ("2024-03-20", "2024-09-29"),
     2025: ("2025-03-27", "2025-09-28"),
-    # 2026 season in progress — end date clamped to the latest completed
-    # ISO week so fetchers don't hit future-dated empty ranges on BRef /
-    # Statcast. Update as the season progresses (or drive from today()).
-    2026: ("2026-03-26", "2026-04-20"),
+    _CURRENT_SEASON: ("2026-03-26", _IN_PROGRESS_SEASON_END),
 }
 
 

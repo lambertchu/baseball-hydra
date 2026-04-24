@@ -223,7 +223,13 @@ def main(argv: list[str] | None = None) -> int:
     pa_pred = np.asarray(preds["pa_remaining"], dtype=np.float64).squeeze(-1)
 
     taus = list(config["model"].get("taus", [0.05, 0.25, 0.50, 0.75, 0.95]))
-    median_idx = taus.index(0.50)
+    # Prefer the exact 0.5 index; fall back to the middle quantile for tau
+    # grids that don't contain the median exactly (mirrors predict_phase2
+    # in scripts/benchmark_ros.py).
+    try:
+        median_idx = taus.index(0.50)
+    except ValueError:
+        median_idx = len(taus) // 2
     lo_idx = taus.index(0.05) if 0.05 in taus else 0
     hi_idx = taus.index(0.95) if 0.95 in taus else len(taus) - 1
 
