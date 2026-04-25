@@ -27,9 +27,10 @@ import numpy as np
 import pandas as pd
 
 from src.features.in_season import compute_in_season_features
-from src.features.registry import PLAYER_SEASON_KEY, FeatureGroup, get_feature_names
+from src.features.registry import PLAYER_SEASON_KEY, FeatureGroup
 from src.models.baselines.shrinkage import ROS_RATE_TARGETS
 from src.models.mtl_ros.train import train_ros
+from src.models.ros.train import build_phase2_feature_frame, train_ros_sequence
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,9 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_historical_snapshots(
-    raw_dir: Path, year: int
-) -> pd.DataFrame:
+def _load_historical_snapshots(raw_dir: Path, year: int) -> pd.DataFrame:
     """Concat all ``weekly_snapshots_{y}.parquet`` for y < year."""
     frames: list[pd.DataFrame] = []
     for path in sorted(raw_dir.glob("weekly_snapshots_*.parquet")):
@@ -58,9 +57,7 @@ def _load_historical_snapshots(
     return pd.concat(frames, ignore_index=True)
 
 
-def _synthesize_current_preseason(
-    merged: pd.DataFrame, year: int
-) -> pd.DataFrame:
+def _synthesize_current_preseason(merged: pd.DataFrame, year: int) -> pd.DataFrame:
     """Make a ``year`` preseason frame by copying ``year - 1`` rows.
 
     age += 1, age_squared recomputed, season reassigned, target_* dropped.
@@ -106,15 +103,28 @@ def _latest_row_per_player(snapshots: pd.DataFrame) -> pd.DataFrame:
     return snapshots.loc[idx].reset_index(drop=True)
 
 
+def _force_train_only_splits(config: dict, train_end_season: int) -> None:
+    """Replace split config with train-only boundaries for production retrains."""
+    config["splits"] = {"train_end_season": int(train_end_season)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--year", type=int, default=2026)
+    parser.add_argument("--config", type=Path, default=Path("configs/mtl_ros.yaml"))
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/mtl_ros.yaml")
+        "--model",
+        choices=["phase2", "phase3"],
+        default="phase2",
+        help="ROS model to train/generate (default: phase2).",
     )
     parser.add_argument(
-        "--raw-dir", type=Path, default=Path("data/raw")
+        "--phase3-config",
+        type=Path,
+        default=Path("configs/ros.yaml"),
+        help="Phase 3 GRU config, used only with --model phase3.",
     )
+    parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     parser.add_argument(
         "--merged-path",
         type=Path,
@@ -145,8 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("training", {})["epochs"] = int(args.epochs)
     if args.device is not None:
         config.setdefault("training", {})["device"] = args.device
-    # Force splits so EVERY historical row lands in train.
-    config["splits"] = {"train_end_season": int(args.year - 1)}
+    # Force splits so EVERY historical row lands in train and the YAML holdouts
+    # are disabled for this train-on-all-history projection run.
+    _force_train_only_splits(config, args.year - 1)
 
     # --- Training data --------------------------------------------------
     snapshots_train = _load_historical_snapshots(args.raw_dir, args.year)
@@ -170,15 +181,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     preseason_full = pd.concat([merged, synth_current], ignore_index=True)
 
-    # --- Train ----------------------------------------------------------
-    ensemble = train_ros(
+    # --- Train Phase 2 base --------------------------------------------
+    phase2_ensemble = train_ros(
         config, snapshots_df=snapshots_train, preseason_df=preseason_full
     )
-    logger.info(
-        "Trained %d-seed ensemble on %d feature columns",
-        len(getattr(ensemble, "forecasters_", [])),
-        len(getattr(ensemble, "feature_names_", [])),
-    )
+    ensemble = phase2_ensemble
+
+    if args.model == "phase3":
+        with open(args.phase3_config) as f:
+            phase3_config: dict = yaml.safe_load(f)
+        if args.n_seeds is not None:
+            phase3_config.setdefault("ensemble", {})["n_seeds"] = int(args.n_seeds)
+        if args.epochs is not None:
+            phase3_config.setdefault("training", {})["epochs"] = int(args.epochs)
+        if args.device is not None:
+            phase3_config.setdefault("training", {})["device"] = args.device
+        _force_train_only_splits(phase3_config, args.year - 1)
+        ensemble = train_ros_sequence(
+            phase3_config,
+            snapshots_df=snapshots_train,
+            preseason_df=preseason_full,
+            base_forecaster=phase2_ensemble.forecasters_[0],
+        )
+        logger.info(
+            "Trained Phase 3 ensemble with %d members",
+            len(getattr(ensemble, "forecasters_", [])),
+        )
+    else:
+        logger.info(
+            "Trained %d-seed Phase 2 ensemble on %d feature columns",
+            len(getattr(ensemble, "forecasters_", [])),
+            len(getattr(ensemble, "feature_names_", [])),
+        )
 
     # --- Inference on latest 2026 snapshot per player -------------------
     snap_path = args.raw_dir / f"weekly_snapshots_{args.year}.parquet"
@@ -191,38 +225,64 @@ def main(argv: list[str] | None = None) -> int:
     latest = _latest_row_per_player(current)
     logger.info("Latest-week rows for %d: %d players", args.year, len(latest))
 
-    # Compute in-season features + join synthesized preseason
-    in_season_feats = compute_in_season_features(latest)
-    dup_cols = [c for c in in_season_feats.columns if c in latest.columns]
-    enriched = pd.concat(
-        [latest.drop(columns=dup_cols, errors="ignore"), in_season_feats],
-        axis=1,
-    )
-    overlap = (set(enriched.columns) & set(synth_current.columns)) - set(
-        PLAYER_SEASON_KEY
-    )
-    pre_to_join = synth_current.drop(columns=list(overlap), errors="ignore")
-    enriched = enriched.merge(
-        pre_to_join,
-        on=list(PLAYER_SEASON_KEY),
-        how="left",
-        validate="many_to_one",
-    )
+    if args.model == "phase3":
+        context = current.merge(
+            latest[list(PLAYER_SEASON_KEY)].drop_duplicates(),
+            on=list(PLAYER_SEASON_KEY),
+            how="inner",
+        ).reset_index(drop=True)
+        base = ensemble.forecasters_[0].base_forecaster
+        X_context = build_phase2_feature_frame(context, base, synth_current)
+        preds_context = ensemble.predict(context, X_context)
+        key_cols = list(PLAYER_SEASON_KEY) + ["iso_year", "iso_week"]
+        lookup = latest[key_cols].merge(
+            context[key_cols].reset_index().rename(columns={"index": "__pos"}),
+            on=key_cols,
+            how="left",
+        )
+        if lookup["__pos"].isna().any():
+            raise RuntimeError(
+                "Could not map Phase 3 context predictions to latest rows"
+            )
+        pos = lookup["__pos"].astype(int).to_numpy()
+        q = np.asarray(preds_context["quantiles"], dtype=np.float64)[pos]
+        pa_pred = np.asarray(preds_context["pa_remaining"], dtype=np.float64).squeeze(
+            -1
+        )[pos]
+        taus = list(base.taus)
+    else:
+        # Compute in-season features + join synthesized preseason
+        in_season_feats = compute_in_season_features(latest)
+        dup_cols = [c for c in in_season_feats.columns if c in latest.columns]
+        enriched = pd.concat(
+            [latest.drop(columns=dup_cols, errors="ignore"), in_season_feats],
+            axis=1,
+        )
+        overlap = (set(enriched.columns) & set(synth_current.columns)) - set(
+            PLAYER_SEASON_KEY
+        )
+        pre_to_join = synth_current.drop(columns=list(overlap), errors="ignore")
+        enriched = enriched.merge(
+            pre_to_join,
+            on=list(PLAYER_SEASON_KEY),
+            how="left",
+            validate="many_to_one",
+        )
 
-    feature_names = list(ensemble.feature_names_)
-    X = enriched.reindex(columns=feature_names).astype(float)
-    # Missing-feature fill using training means (neutral post-scaling)
-    train_names = list(ensemble.forecasters_[0].feature_names_)
-    scaler = ensemble.forecasters_[0].feature_scaler_
-    mean_by_name = dict(zip(train_names, scaler.mean_))
-    X.fillna(value=mean_by_name, inplace=True)
-    X.fillna(value=0.0, inplace=True)
+        feature_names = list(ensemble.feature_names_)
+        X = enriched.reindex(columns=feature_names).astype(float)
+        # Missing-feature fill using training means (neutral post-scaling)
+        train_names = list(ensemble.forecasters_[0].feature_names_)
+        scaler = ensemble.forecasters_[0].feature_scaler_
+        mean_by_name = dict(zip(train_names, scaler.mean_))
+        X.fillna(value=mean_by_name, inplace=True)
+        X.fillna(value=0.0, inplace=True)
 
-    preds = ensemble.predict(X)
-    q = np.asarray(preds["quantiles"], dtype=np.float64)  # (n, 6, 5)
-    pa_pred = np.asarray(preds["pa_remaining"], dtype=np.float64).squeeze(-1)
+        preds = ensemble.predict(X)
+        q = np.asarray(preds["quantiles"], dtype=np.float64)  # (n, 6, 5)
+        pa_pred = np.asarray(preds["pa_remaining"], dtype=np.float64).squeeze(-1)
+        taus = list(config["model"].get("taus", [0.05, 0.25, 0.50, 0.75, 0.95]))
 
-    taus = list(config["model"].get("taus", [0.05, 0.25, 0.50, 0.75, 0.95]))
     # Prefer the exact 0.5 index; fall back to the middle quantile for tau
     # grids that don't contain the median exactly (mirrors predict_phase2
     # in scripts/benchmark_ros.py).
@@ -239,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         record = {
             "mlbam_id": int(row["mlbam_id"]),
             "season": int(row["season"]),
+            "model": args.model,
             "iso_week": int(row["iso_week"]),
             "pa_ytd": float(row.get("pa_ytd", np.nan)),
             "ros_pa_pred": float(max(pa_pred[row_i], 0.0)),

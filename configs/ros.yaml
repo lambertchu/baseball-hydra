@@ -1,0 +1,46 @@
+# Phase 3 ROS sequential GRU configuration
+
+base_phase2:
+  # May point either at a single seed dir containing mtl_ros_forecaster.pt or
+  # at an ensemble dir containing seed_0/.
+  model_dir: "data/models/mtl_ros_quantile/seed_0"
+
+model:
+  encoder_dim: 32
+  gru_hidden_dim: 128
+  dropout: 0.10
+  max_seq_len: 32
+
+loss:
+  pa_weight: 1.0
+
+training:
+  batch_size: 64
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 10
+  recency_decay_lambda: 0.30
+  min_ytd_pa: 50
+  device: "cpu"
+
+ensemble:
+  n_seeds: 3
+  base_seed: 42
+
+data:
+  snapshots_dir: "data/raw"
+  snapshots_pattern: "weekly_snapshots_{year}.parquet"
+  preseason_path: "data/merged_batter_data.parquet"
+  enforce_backfill_gate: true
+  min_snapshot_years: 7
+
+splits:
+  train_end_season: 2022
+  val_season: 2023
+  test_season: 2024
+
+output:
+  model_dir: "data/models/ros_sequence"
+
+seed: 42
