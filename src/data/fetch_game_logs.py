@@ -483,14 +483,16 @@ def fetch_batter_weekly_stats_from_statcast(
     force: bool = False,
     delay: float = 5.0,
     min_pa: int = 1,
+    calibrate_season_totals: bool = False,
 ) -> Path:
     """Fetch full Statcast pitch data and derive weekly batting logs.
 
     This is a fallback for environments where Baseball Reference's daily
     batting endpoint is unavailable. Core PA/AB/H/2B/3B/HR/BB/SO/HBP/SH/SF
     counts are derived from Statcast PA-ending events; R/RBI/SB/CS are
-    attributed from score/base-state descriptions and then scaled to local
-    season batting totals when ``batting_{year}.parquet`` is available.
+    attributed from score/base-state descriptions. Optional season-total
+    calibration is disabled by default because it lets end-of-season totals
+    influence midseason cutoff rows.
     """
     try:
         import pybaseball
@@ -538,6 +540,7 @@ def fetch_batter_weekly_stats_from_statcast(
                 on="mlbam_id",
                 how="left",
             )
+    if totals is not None and calibrate_season_totals:
         weekly = _overlay_scaled_season_totals(weekly, totals)
 
     for col in ("name", "age", "team"):
@@ -733,6 +736,13 @@ def main() -> None:
         help="Weekly batting source: Baseball Reference range splits or "
         "Statcast-derived fallback (default: bref).",
     )
+    parser.add_argument(
+        "--calibrate-season-totals",
+        action="store_true",
+        help="For --source statcast only, scale R/RBI/SB/CS weekly estimates to "
+        "local full-season batting totals. Disabled by default to avoid "
+        "end-of-season leakage in midseason cutoff snapshots.",
+    )
     args = parser.parse_args()
 
     years = _parse_season_tokens(args.seasons)
@@ -748,6 +758,7 @@ def main() -> None:
                     force=args.force,
                     delay=args.delay,
                     min_pa=args.min_pa,
+                    calibrate_season_totals=args.calibrate_season_totals,
                 )
             else:
                 fetch_batter_weekly_stats(

@@ -12,6 +12,8 @@ Covers:
 from __future__ import annotations
 
 from datetime import date
+import sys
+import types
 
 import numpy as np
 import pandas as pd
@@ -33,6 +35,7 @@ from src.data.fetch_game_logs import (
     _normalize_bref_columns,
     _overlay_scaled_season_totals,
     fetch_batter_weekly_stats,
+    fetch_batter_weekly_stats_from_statcast,
     iso_weeks_in_season,
 )
 from src.data.fetch_statcast import _aggregate_batter_statcast_weekly
@@ -324,6 +327,90 @@ class TestStatcastWeeklyBattingFallback:
             "sb": 6,
             "cs": 3,
         }
+
+    def test_fetch_default_does_not_leak_full_season_totals(
+        self, tmp_path, monkeypatch
+    ):
+        raw = pd.DataFrame([
+            _make_statcast_pa_row(
+                10,
+                "home_run",
+                game_pk=1,
+                at_bat_number=1,
+                bat_score=0,
+                post_bat_score=1,
+            )
+        ])
+        pd.DataFrame({
+            "mlbam_id": [10],
+            "name": ["Player Ten"],
+            "age": [28],
+            "team": ["AAA"],
+            "r": [10],
+            "rbi": [10],
+            "sb": [5],
+            "cs": [2],
+        }).to_parquet(tmp_path / "batting_2024.parquet", index=False)
+        fake_pybaseball = types.SimpleNamespace(
+            statcast=lambda start_dt, end_dt: raw
+        )
+        monkeypatch.setitem(sys.modules, "pybaseball", fake_pybaseball)
+
+        path = fetch_batter_weekly_stats_from_statcast(
+            2024,
+            out_dir=tmp_path,
+            force=True,
+            delay=0.0,
+        )
+        weekly = pd.read_parquet(path)
+
+        assert weekly.loc[0, "name"] == "Player Ten"
+        assert weekly.loc[0, "r"] == 1
+        assert weekly.loc[0, "rbi"] == 1
+        assert weekly.loc[0, "sb"] == 0
+        assert weekly.loc[0, "cs"] == 0
+
+    def test_fetch_can_optionally_calibrate_season_totals(
+        self, tmp_path, monkeypatch
+    ):
+        raw = pd.DataFrame([
+            _make_statcast_pa_row(
+                10,
+                "home_run",
+                game_pk=1,
+                at_bat_number=1,
+                bat_score=0,
+                post_bat_score=1,
+            )
+        ])
+        pd.DataFrame({
+            "mlbam_id": [10],
+            "name": ["Player Ten"],
+            "age": [28],
+            "team": ["AAA"],
+            "r": [10],
+            "rbi": [10],
+            "sb": [5],
+            "cs": [2],
+        }).to_parquet(tmp_path / "batting_2024.parquet", index=False)
+        fake_pybaseball = types.SimpleNamespace(
+            statcast=lambda start_dt, end_dt: raw
+        )
+        monkeypatch.setitem(sys.modules, "pybaseball", fake_pybaseball)
+
+        path = fetch_batter_weekly_stats_from_statcast(
+            2024,
+            out_dir=tmp_path,
+            force=True,
+            delay=0.0,
+            calibrate_season_totals=True,
+        )
+        weekly = pd.read_parquet(path)
+
+        assert weekly.loc[0, "r"] == 10
+        assert weekly.loc[0, "rbi"] == 10
+        assert weekly.loc[0, "sb"] == 5
+        assert weekly.loc[0, "cs"] == 2
 
 
 # ---------------------------------------------------------------------------
