@@ -29,7 +29,9 @@ from src.data.build_snapshots import (
     build_weekly_snapshots,
 )
 from src.data.fetch_game_logs import (
+    _aggregate_statcast_batting_weekly,
     _normalize_bref_columns,
+    _overlay_scaled_season_totals,
     fetch_batter_weekly_stats,
     iso_weeks_in_season,
 )
@@ -123,6 +125,39 @@ def _make_weekly_batting_row(
     }
 
 
+def _make_statcast_pa_row(
+    batter: int,
+    event: str,
+    game_date: str = "2024-04-08",
+    game_pk: int = 1,
+    at_bat_number: int = 1,
+    pitch_number: int = 1,
+    on_1b: int | None = None,
+    on_2b: int | None = None,
+    on_3b: int | None = None,
+    bat_score: int = 0,
+    post_bat_score: int = 0,
+    des: str = "",
+) -> dict:
+    """Build a minimal final-pitch Statcast row for batting aggregation tests."""
+    return {
+        "batter": batter,
+        "game_date": pd.Timestamp(game_date),
+        "game_pk": game_pk,
+        "at_bat_number": at_bat_number,
+        "pitch_number": pitch_number,
+        "events": event,
+        "description": "hit_into_play",
+        "game_type": "R",
+        "on_1b": on_1b,
+        "on_2b": on_2b,
+        "on_3b": on_3b,
+        "bat_score": bat_score,
+        "post_bat_score": post_bat_score,
+        "des": des,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Weekly Statcast aggregation
 # ---------------------------------------------------------------------------
@@ -186,6 +221,109 @@ class TestAggregateWeekly:
         assert "sweet_spot_rate" in agg.columns
         assert (agg["barrel_rate"] >= 0).all()
         assert (agg["barrel_rate"] <= 1).all()
+
+
+class TestStatcastWeeklyBattingFallback:
+    """Tests for deriving BRef-like weekly batting logs from full Statcast."""
+
+    def test_aggregates_pa_counts_runs_rbi_and_running_events(self):
+        raw = pd.DataFrame([
+            _make_statcast_pa_row(
+                10,
+                "single",
+                game_pk=1,
+                at_bat_number=1,
+                bat_score=0,
+                post_bat_score=0,
+            ),
+            _make_statcast_pa_row(
+                20,
+                "home_run",
+                game_pk=1,
+                at_bat_number=2,
+                on_1b=10,
+                bat_score=0,
+                post_bat_score=2,
+            ),
+            _make_statcast_pa_row(
+                10,
+                "walk",
+                game_pk=1,
+                at_bat_number=3,
+                bat_score=2,
+                post_bat_score=2,
+            ),
+            _make_statcast_pa_row(
+                10,
+                "sac_fly",
+                game_pk=1,
+                at_bat_number=4,
+                on_3b=20,
+                bat_score=2,
+                post_bat_score=3,
+            ),
+            _make_statcast_pa_row(
+                30,
+                "truncated_pa",
+                game_pk=1,
+                at_bat_number=5,
+                on_1b=10,
+                bat_score=3,
+                post_bat_score=3,
+                des="Player Ten caught stealing 2nd base, catcher to shortstop.",
+            ),
+        ])
+
+        weekly = _aggregate_statcast_batting_weekly(raw, season=2024)
+        by_id = weekly.set_index("mlbam_id")
+
+        assert by_id.loc[10, "pa"] == 3
+        assert by_id.loc[10, "ab"] == 1
+        assert by_id.loc[10, "h"] == 1
+        assert by_id.loc[10, "bb"] == 1
+        assert by_id.loc[10, "sf"] == 1
+        assert by_id.loc[10, "r"] == 1
+        assert by_id.loc[10, "rbi"] == 1
+        assert by_id.loc[10, "cs"] == 1
+
+        assert by_id.loc[20, "pa"] == 1
+        assert by_id.loc[20, "ab"] == 1
+        assert by_id.loc[20, "h"] == 1
+        assert by_id.loc[20, "hr"] == 1
+        assert by_id.loc[20, "r"] == 2
+        assert by_id.loc[20, "rbi"] == 2
+
+    def test_season_total_overlay_preserves_weekly_shape_and_exact_totals(self):
+        weekly = pd.DataFrame({
+            "mlbam_id": [10, 10, 10],
+            "iso_year": [2024, 2024, 2024],
+            "iso_week": [14, 15, 16],
+            "pa": [10, 20, 30],
+            "r": [0, 1, 2],
+            "rbi": [1, 1, 1],
+            "sb": [0, 0, 0],
+            "cs": [0, 0, 0],
+        })
+        season_totals = pd.DataFrame({
+            "mlbam_id": [10],
+            "r": [6],
+            "rbi": [9],
+            "sb": [6],
+            "cs": [3],
+        })
+
+        out = _overlay_scaled_season_totals(weekly, season_totals)
+
+        assert out["r"].tolist() == [0, 2, 4]
+        assert out["rbi"].tolist() == [3, 3, 3]
+        assert out["sb"].tolist() == [1, 2, 3]
+        assert out["cs"].tolist() == [1, 1, 1]
+        assert out[["r", "rbi", "sb", "cs"]].sum().to_dict() == {
+            "r": 6,
+            "rbi": 9,
+            "sb": 6,
+            "cs": 3,
+        }
 
 
 # ---------------------------------------------------------------------------
