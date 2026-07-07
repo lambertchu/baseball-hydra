@@ -95,6 +95,58 @@ def test_train_only_split_override_drops_yaml_holdouts() -> None:
     assert cfg["splits"] == {"train_end_season": 2025}
 
 
+class _FakeBaseForecaster:
+    def __init__(self, taus: list[float]) -> None:
+        self.taus = taus
+        # build_phase2_feature_frame reads these to align/fill feature rows.
+        self.feature_names_ = ["pa_ytd", "obp_ytd"]
+
+        class _Scaler:
+            mean_ = np.array([100.0, 0.320])
+
+        self.feature_scaler_ = _Scaler()
+
+
+class _FakeFittedPhase3Ensemble:
+    """Fake exposing forecasters_[0].base_forecaster like the real ensemble."""
+
+    def __init__(self, taus: list[float]) -> None:
+        self.is_fitted_ = True
+        self._n_q = len(taus)
+
+        class _Member:
+            pass
+
+        member = _Member()
+        member.base_forecaster = _FakeBaseForecaster(taus)
+        self.forecasters_ = [member]
+
+    def predict(self, snapshots: pd.DataFrame, phase2_features: pd.DataFrame) -> dict:
+        n = len(snapshots)
+        base = np.array([0.32, 0.42, 0.03, 0.12, 0.13, 0.02])
+        offsets = np.linspace(-0.02, 0.02, self._n_q)
+        q = base[None, :, None] + offsets[None, None, :] + np.zeros((n, 1, 1))
+        return {"quantiles": q, "pa_remaining": np.full((n, 1), 250.0)}
+
+
+def test_predict_phase3_median_uses_fitted_base_taus_not_config_default() -> None:
+    """Non-default 3-quantile base grid: the median must be column 1, not the
+    index the 5-quantile DEFAULT grid would give (2 → the 0.9 quantile here)."""
+    context = _snapshots()
+    checkpoint_rows = context.iloc[[1]].reset_index(drop=True)
+
+    point, q = br.predict_phase3(
+        rows=checkpoint_rows,
+        yearly_snapshots=context,
+        ensemble=_FakeFittedPhase3Ensemble(taus=[0.1, 0.5, 0.9]),
+        phase3_config={"model": {}},  # configs/ros.yaml defines no model.taus
+        preseason=None,
+    )
+
+    assert q.shape == (1, 6, 3)
+    np.testing.assert_allclose(point.iloc[0].to_numpy(), q[0, :, 1])
+
+
 def test_predict_phase3_maps_full_context_back_to_checkpoint_rows() -> None:
     context = _snapshots()
     checkpoint_rows = context.iloc[[1]].reset_index(drop=True)

@@ -636,7 +636,19 @@ def predict_phase3(
     pos = lookup["__pos"].astype(int).to_numpy()
     q_arr = q_context[pos]
 
-    taus = list(phase3_config.get("model", {}).get("taus", DEFAULT_QUANTILE_TAUS))
+    # The Phase 3 network reuses the Phase 2 base's quantile decoder, so the
+    # emitted grid is the base forecaster's fitted taus — configs/ros.yaml
+    # defines no model.taus. Config is only a fallback for ensembles that
+    # don't expose a base (e.g. test doubles).
+    taus: list[float] | None = None
+    forecasters = getattr(ensemble, "forecasters_", None)
+    if forecasters:
+        base = getattr(forecasters[0], "base_forecaster", None)
+        base_taus = getattr(base, "taus", None) if base is not None else None
+        if base_taus is not None and len(base_taus):
+            taus = [float(t) for t in base_taus]
+    if taus is None:
+        taus = list(phase3_config.get("model", {}).get("taus", DEFAULT_QUANTILE_TAUS))
     try:
         median_idx = taus.index(0.5)
     except ValueError:
