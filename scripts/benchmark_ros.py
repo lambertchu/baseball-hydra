@@ -14,6 +14,9 @@ six ROS targets: OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA):
 * **phase2** — quantile-regressing MTL trained on weekly snapshots. Expensive;
   retrains an ensemble per eval year from all earlier snapshots. Emits full
   quantile arrays so pinball loss / PIT coverage are computed alongside RMSE.
+* **phase3** — sequential GRU over weekly features on top of a frozen Phase 2
+  base. Parked: failed its go/no-go gate (see CLAUDE.md §7.3). Excluded from
+  the default ``--include`` set; list it explicitly to retrain/score it.
 
 Usage
 -----
@@ -25,6 +28,10 @@ Usage
 
     # Phase 2 ensemble + quantile metrics (requires weekly snapshot data):
     uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --include phase2 --retrain
+
+    # Opt into the parked Phase 3 GRU alongside everything else:
+    uv run python scripts/benchmark_ros.py --years 2023 2024 --retrain --include \
+        persist_observed frozen_preseason marcel_blend shrinkage phase2 phase3
 """
 
 from __future__ import annotations
@@ -84,6 +91,11 @@ _BASELINES_NEED_PRESEASON = (
     "phase3",
 )
 ALL_BASELINES = (*_BASELINES_NO_PRESEASON, *_BASELINES_NEED_PRESEASON)
+
+# phase3 is parked (failed its go/no-go gate) and expensive to retrain
+# (~30 min per eval year), so it is opt-in rather than part of the default
+# --include set.
+DEFAULT_BASELINES = tuple(b for b in ALL_BASELINES if b != "phase3")
 
 # Baselines that emit full quantile arrays (shape (n, 6, n_taus)) alongside
 # their point estimate. These are the ones that participate in pinball / PIT
@@ -1375,8 +1387,9 @@ def main() -> None:
         "--include",
         nargs="+",
         choices=list(ALL_BASELINES),
-        default=list(ALL_BASELINES),
-        help=f"Baselines to include (default: all {list(ALL_BASELINES)})",
+        default=list(DEFAULT_BASELINES),
+        help=f"Baselines to include (default: {list(DEFAULT_BASELINES)}; "
+        "phase3 is parked and must be listed explicitly)",
     )
     parser.add_argument(
         "--prior-pa",

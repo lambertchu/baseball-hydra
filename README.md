@@ -5,7 +5,7 @@
 Baseball Hydra predicts batter stats — OBP, SLG, HR, R, RBI, and SB — in two flavors:
 
 1. **Preseason (full-season)** — a multi-task learning (MTL) neural network trained on a decade of FanGraphs + Statcast + Baseball Savant data, benchmarked against ZiPS and Steamer over 1,063 player-seasons (2022-2025).
-2. **In-season rest-of-season (ROS)** — a closed-form Beta-Binomial shrinkage baseline that blends the preseason MTL prior with year-to-date counts from a weekly BRef + Statcast snapshot pipeline, evaluated at 50/100/200/400 PA checkpoints across 2023-2025.
+2. **In-season rest-of-season (ROS)** — a closed-form Beta-Binomial shrinkage baseline that blends the preseason MTL prior with year-to-date counts from a weekly BRef + Statcast snapshot pipeline, evaluated at 50/100/200/400 PA checkpoints on recent seasons.
 
 The codebase was developed using Claude Code. [Here's the link](https://lambertchu.com/blog/vibe-coding-baseball) to my blog post describing my process of building this model.
 
@@ -28,16 +28,16 @@ Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
 
 ### How the ROS pipeline stacks up
 
-Pooled mean RMSE across 2023-2025 weekly snapshots at each PA checkpoint:
+Pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint (Phase 2/3 trained on backfilled 2016-2022 snapshots):
 
-| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 (parked) |
-| ------------- | ---------- | --------- | ----------- | -------------------- | --------------- |
-| 50            | 0.0591     | 0.0309    | 0.0313      | **0.0303**           | 0.0314          |
-| 100           | 0.0481     | 0.0312    | 0.0322      | **0.0307**           | 0.0321          |
-| 200           | 0.0418     | 0.0340    | 0.0346      | **0.0332**           | 0.0348          |
-| 400           | 0.0414     | 0.0386    | 0.0387      | **0.0376**           | 0.0401          |
+| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 (parked) | Phase3 (parked) |
+| ------------- | ---------- | --------- | ----------- | -------------------- | --------------- | --------------- |
+| 50            | 0.0586     | 0.0313    | 0.0318      | **0.0311**           | 0.0319          | 0.0338          |
+| 100           | 0.0484     | 0.0317    | 0.0328      | **0.0319**           | 0.0335          | 0.0357          |
+| 200           | 0.0425     | 0.0351    | 0.0357      | **0.0349**           | 0.0375          | 0.0424          |
+| 400           | 0.0421     | 0.0391    | 0.0394      | **0.0387**           | 0.0418          | 0.0528          |
 
-The closed-form Bayesian shrinkage baseline wins every PA checkpoint. An experimental Phase 2 quantile-head MTL (`src/models/mtl_ros/`) is fully implemented, tested, and benchmarked but underperforms shrinkage by ~4-5% — most likely due to weekly snapshot data being backfilled only for 2023-2025 (~27k cutoff rows). The Phase 2 code stays in-tree for a future retry once 2016-2022 snapshots are backfilled.
+The closed-form Bayesian shrinkage baseline wins every PA checkpoint. Two neural challengers are fully implemented and tested but parked after failing their go/no-go gates: the Phase 2 quantile-head MTL (`src/models/mtl_ros/`, +7% pooled pinball vs shrinkage — reaches parity when the SB task, poisoned by a known defect in the Statcast-derived 2016-2022 weekly logs, is excluded) and the Phase 3 sequential GRU (`src/models/ros/`, +19-28% pinball vs Phase 2 with the worst calibration). Both are opt-in only; see `CLAUDE.md` §5.3 and §7.3 for details and reactivation commands.
 
 ## Prerequisites
 
@@ -81,8 +81,9 @@ uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-ta
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --pit-plot      # + PIT histograms for shrinkage & phase2
 
 # Step 9 (optional): Phase 2 ROS quantile MTL — train and generate current-year projections
-uv run python -m src.models.mtl_ros.train --config configs/mtl_ros.yaml                 # train + eval on 2023/2024 snapshots
+uv run python -m src.models.mtl_ros.train --config configs/mtl_ros.yaml                 # train + eval on weekly snapshots
 uv run python scripts/generate_ros_projections.py --year 2026                           # 2026 ROS projections → data/projections/ros_mtl_2026.csv
+uv run python scripts/generate_ros_projections.py --year 2026 --model phase3            # parked Phase 3 GRU instead (opt-in)
 ```
 
 The training scripts handle feature engineering, train/val/test splitting, model training,
@@ -154,7 +155,8 @@ data/
 │       ├── benchmark_ros_report.json
 │       ├── benchmark_ros_table.csv
 │       ├── preseason/             # Per-year preseason MTL prediction cache
-│       └── phase2/                # Per-year Phase 2 ensemble checkpoints
+│       ├── phase2/                # Per-year Phase 2 ensemble checkpoints
+│       └── phase3/                # Per-year Phase 3 GRU ensemble checkpoints (parked)
 └── projections/                   # Preseason + ROS projections
     ├── projections_mtl_2026.csv
     ├── projections_vs_external_2026.csv  # Preseason vs public projections
@@ -174,7 +176,8 @@ Implemented in `src/eval/`:
 - Marcel PA projection + rate_to_count helper (`src/eval/pa_projection.py`)
 - **ROS metrics** (`src/eval/ros_metrics.py`): pinball quantile loss, PIT coverage for calibration, per-player PA-checkpoint row selection — used by the ROS benchmark script
 - **Shrinkage baseline** (`src/models/baselines/shrinkage.py`): closed-form Beta-Binomial posterior per stat (OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA) with per-stat pseudocount τ₀ (stabilisation-based defaults or fit via leave-one-year-out cross-fitting); emits both posterior means and Beta-CDF quantiles for pinball/PIT
-- **Phase 2 MTL ROS** (`src/models/mtl_ros/`): quantile-regressing MTL with a 7th PA-remaining head, pinball + Kendall uncertainty weighting, multi-seed ensemble with monotonic quantile sort
+- **Phase 2 MTL ROS** (`src/models/mtl_ros/`): quantile-regressing MTL with a 7th PA-remaining head, pinball + Kendall uncertainty weighting, multi-seed ensemble with monotonic quantile sort (parked)
+- **Phase 3 ROS GRU** (`src/models/ros/`): weekly sequence encoders → GRU → precision-weighted blend with a frozen Phase 2 base (parked — failed its benchmark gate; opt-in via `--include ... phase3` / `--model phase3`)
 
 ## Project Structure
 
