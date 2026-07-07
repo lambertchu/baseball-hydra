@@ -61,6 +61,7 @@ All targets are predicted as per-PA rates internally. At inference, count stat r
 - **Season boundaries**: regular season only (`game_type == 'R'`). No spring training, postseason, or All-Star data.
 - **Target alignment**: features from year Y predict targets from year Y+1. The feature row for (player, 2024) has target values from (player, 2025).
 - **2020 shortened season (60 games)**: handled via rate-based targets — count targets (HR, R, RBI, SB) are stored as per-PA rates, making them comparable across seasons regardless of length. Raw counting stat features (`hr`, `sb`, `cs`) and their temporal derivatives are excluded from the model (via `exclude_features` in `data.yaml`); their per-PA rate equivalents are used instead. PA projection uses `season_games: {2020: 60}` to scale 2020 PA to 162-game pace for the Marcel formula.
+- **Backfilled weekly logs (2016-2022) undercount SB/CS**: `batting_week_{2016..2022}.parquet` are derived from Statcast pitch events (BRef fallback in `fetch_game_logs.py`), which cannot see mid-PA steals — SB/CS carry only ~6% of true volume (`sb_per_pa_ytd` ≈ 0.001 vs 0.018 in native BRef years). This poisons SB features **and** `ros_sb`/`ros_sb_per_pa` targets in those seasons. R/RBI reconstruction is accurate to ~4%. `--calibrate-season-totals` can rescale to season totals but is off by default (end-of-season leakage into mid-season rows); the real fix is a BRef weekly re-fetch for 2016-2022.
 
 ### 3.3 Output Schema
 
@@ -201,7 +202,7 @@ Generated for all 6 target stats (obp, slg, hr, r, rbi, sb), 3 expected Statcast
 
 ## 5) Modeling Approach — MTL (Multi-Task Learning) Neural Network
 
-The project now has two parallel MTL tracks — a production preseason point-estimate regressor and an exploratory ROS quantile regressor.
+The project has one production track and two parked in-season experiments: the preseason point-estimate MTL (production), the Phase 2 ROS quantile MTL (parked), and the Phase 3 ROS GRU (parked). Shrinkage (`src/models/baselines/shrinkage.py`) is the production ROS system.
 
 ### 5.1 Preseason MTL — `src/models/mtl/` (point estimates)
 
@@ -231,7 +232,14 @@ The project now has two parallel MTL tracks — a production preseason point-est
 - Sample weights = `exp(-λΔseason) × √(ros_pa+1)`, mean-normalized — down-weights tiny-denominator rows, up-weights longer horizons.
 - Preseason features are joined from `merged_batter_data.parquet` on `(mlbam_id, season)`; `team_stats` is **disabled** by default because the stored values are end-of-season totals and would leak future info into mid-season rows.
 - Config: `configs/mtl_ros.yaml`.
-- **Status**: benchmarks at **0.0321 mean RMSE / 0.0086 mean pinball at 100 PA** — ~4-5% behind the shrinkage baseline (0.0307 / 0.0081). Fails the go/no-go gate; shrinkage remains the production ROS system. The most likely unlock is backfilling weekly snapshots for 2016-2022 (currently only 2023-2025 are populated, ~27k cutoff rows).
+- **Status**: parked — fails the go/no-go gate even after the 2016-2022 snapshot backfill (~54-72k training cutoffs per eval year). Pooled 2023-2024: **0.0087 mean pinball at 100 PA vs shrinkage's 0.0081 (+7%)**. The backfill did help (-3.2% same-year pinball on eval-2024, -6.5% excluding SB), and excluding the SB task (poisoned in backfilled years, see §3.2) Phase 2 is at parity with shrinkage at 50-100 PA — but parity doesn't clear the gate. Shrinkage remains the production ROS system.
+
+### 5.3 Phase 3 ROS GRU — `src/models/ros/` (sequential, parked)
+
+- Three per-week feature encoders (mechanics / plate discipline / outcome, 27 `seq_*` columns from `*_week` snapshot data) → 1-layer GRU(128) → precision-weighted blend with a frozen Phase 2 seed_0 base, reusing its quantile decoder. Config: `configs/ros.yaml` (includes a `min_snapshot_years: 7` backfill gate).
+- **Status: parked — decisively fails its gate** (needed ≥3% better pooled pinball than Phase 2 + improved calibration). Pooled 2023-2024: **+19% pinball vs Phase 2 at 100 PA, +28% at 200 PA, +27-38% vs shrinkage**, worst PIT calibration (max coverage deviation 0.61), and still worse than Phase 2 with the poisoned SB task excluded. Error grows with the season (mean RMSE 0.034→0.053 from 50→400 PA) — the recurrent path hurts at this data scale, as the plan's risk table predicted.
+- **Not active anywhere by default**: `benchmark_ros.py` excludes `phase3` from its default `--include`; `generate_ros_projections.py` defaults to `--model phase2`; nothing in the production shrinkage path touches it.
+- **To reactivate**: `uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --include persist_observed frozen_preseason marcel_blend shrinkage phase2 phase3` (benchmark), `uv run python scripts/generate_ros_projections.py --year 2026 --model phase3` (projections), or `uv run python -m src.models.ros.train --config configs/ros.yaml` (standalone). Trained per-year ensembles are cached under `data/reports/benchmark_ros/phase3/`. Fix the SB backfill defect (§3.2) before any retry.
 
 ---
 
@@ -268,10 +276,11 @@ Every evaluation run must be compared against the **naive persistence** baseline
 
 ## 7) Current Implementation Status
 
-Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. The in-season ROS (rest-of-season) pipeline has two completed phases:
+Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. The in-season ROS (rest-of-season) pipeline completed all three planned phases; only Phase 1 is production:
 
-- **Phase 1 (production)** — weekly snapshot data layer, ROS evaluation harness, and a closed-form Bayesian shrinkage baseline that blends the preseason MTL prior with observed year-to-date counts. Pooled 2023-2025 at 100 PA: **0.0307 mean RMSE / 0.0081 mean pinball** — wins every PA checkpoint.
-- **Phase 2 (parked)** — quantile-head MTL with in-season features, PA-remaining auxiliary head, walk-forward retraining, and multi-seed ensemble. Implemented, tested, and integrated into the ROS benchmark as a `phase2` baseline. **Fails the go/no-go gate** (0.0321 RMSE / 0.0086 pinball at 100 PA) because weekly snapshots are only backfilled for 2023-2025 (~27k cutoffs). Code stays in-tree for a future retry once 2016-2022 snapshots are backfilled; shrinkage is the production ROS system.
+- **Phase 1 (production)** — weekly snapshot data layer, ROS evaluation harness, and a closed-form Bayesian shrinkage baseline that blends the preseason MTL prior with observed year-to-date counts. Wins every PA checkpoint (see §7.3).
+- **Phase 2 (parked)** — quantile-head MTL with in-season features, PA-remaining auxiliary head, walk-forward retraining, and multi-seed ensemble. Retrained on the backfilled 2016-2022 snapshots it improved, but still **fails the go/no-go gate** (+7% pooled pinball vs shrinkage at 100 PA; parity only when the SB task — poisoned in backfilled years, §3.2 — is excluded). See §5.2.
+- **Phase 3 (parked)** — sequential GRU over weekly features on a frozen Phase 2 base. **Decisively fails its gate** (+19-28% pooled pinball vs Phase 2, worst calibration). Not active in any default path; see §5.3 for the verdict and reactivation commands.
 
 ### 7.1 What Was Built
 
@@ -284,13 +293,14 @@ Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, M
 | **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`, `pa_projection.py` | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots, Marcel PA projection (rate → count)                                                          |
 | **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                          |
 | **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
-| **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`), `rate_helpers.py` | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns. Raw Statcast retains `game_date`. Shared `obp_slg` / `safe_div` primitives in `rate_helpers.py` keep the ytd and trail4w rate formulas from drifting. |
+| **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`), `rate_helpers.py` | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns. Raw Statcast retains `game_date`. Shared `obp_slg` / `safe_div` primitives in `rate_helpers.py` keep the ytd and trail4w rate formulas from drifting. A Statcast-derived fallback (`--source statcast`) backfilled 2016-2022 weekly batting when BRef range fetches were unavailable — accurate for PA/AB/H/HR/BB/SO and ~4% low on R/RBI, but undercounts SB/CS ~94% (§3.2). |
 | **ROS Evaluation Harness** | `src/eval/ros_metrics.py`, `scripts/benchmark_ros.py`       | Pinball loss, PIT coverage, PA-checkpoint row selection, plus a rolling ROS benchmark at 50/100/200/400 PA checkpoints across five baselines (point + distributional).     |
 | **ROS Baselines**          | `src/models/baselines/shrinkage.py`                         | Four point/quantile baselines available via the benchmark: `persist_observed`, `frozen_preseason`, `marcel_blend`, and `shrinkage` — a closed-form Beta-Binomial posterior with per-stat pseudocount τ₀ (stabilisation-based defaults, optionally fit via `fit_tau_per_stat` using leave-one-year-out cross-fitting across the eval years to prevent leakage). `shrinkage_posterior_quantiles` also emits Beta-CDF quantile arrays for pinball / PIT. |
 | **In-Season Features (Phase 2)** | `src/features/in_season.py`                           | 24-column in-season feature matrix derived from weekly snapshots: 10 ytd passthroughs + 10 trail4w rates + `week_index` + `pa_fraction` + 2 IL stubs. Registered under `FeatureGroup.IN_SEASON` (opt-in). Shares the `obp_slg` / `safe_div` primitives with `build_snapshots` so the formulas cannot drift. |
 | **MTL ROS (Phase 2)**      | `src/models/mtl_ros/`                                       | Quantile-head MTL with a 7th PA-remaining regression head. `MTLQuantileNetwork` reuses the three-group rate/count/speed backbone but replaces each per-target point head with 5 quantile heads (τ ∈ {0.05, 0.25, 0.50, 0.75, 0.95}). `MultiTaskQuantileLoss` does per-task pinball + Kendall uncertainty weighting + MSE / Gaussian-NLL for the PA head. `MTLQuantileEnsembleForecaster` aggregates N seeds with per-quantile mean and monotonic sort. Trained on per-(player, season, ISO-week) cutoffs with walk-forward splits, recency × √(ros_pa+1) sample weights, and `min_ytd_pa` filtering. |
-| **Phase 2 Benchmark**      | `scripts/benchmark_ros.py` (`phase2` baseline)              | Retrains a Phase 2 ensemble per eval year, caches checkpoints under `data/reports/benchmark_ros/phase2/`, and scores RMSE + pinball + PIT alongside the Phase 1 baselines. Skips phase2 gracefully when the cache is missing and `--retrain` is not passed. |
-| **ROS Projection Script**  | `scripts/generate_ros_projections.py`                       | Trains a Phase 2 ensemble on all pre-`--year` snapshots + a synthesized current-year preseason frame, then predicts ROS rates + remaining PA for the latest weekly snapshot per player in `--year`. Writes `data/projections/ros_mtl_{year}.csv` with median + p05/p95 per stat and convenience ROS count estimates. |
+| **Phase 2/3 Benchmark**    | `scripts/benchmark_ros.py` (`phase2`, `phase3` baselines)   | Retrains a Phase 2 ensemble (and, when explicitly included, a Phase 3 ensemble) per eval year, caches under `data/reports/benchmark_ros/{phase2,phase3}/`, and scores RMSE + pinball + PIT alongside the Phase 1 baselines. Skips gracefully when a cache is missing and `--retrain` is not passed. `phase3` is excluded from the default `--include` set. |
+| **MTL ROS Sequence (Phase 3)** | `src/models/ros/`                                       | `ROSSequenceNetwork` (3 encoders → GRU(128) → precision-weighted blend with frozen Phase 2 base), `ROSSequenceForecaster`/`Ensemble`, weekly `seq_*` feature extraction, cutoff-sliced sequence dataset, standalone train CLI. Parked — see §5.3. |
+| **ROS Projection Script**  | `scripts/generate_ros_projections.py`                       | Trains a Phase 2 ensemble (default; `--model phase3` opts into the parked GRU) on all pre-`--year` snapshots + a synthesized current-year preseason frame, then predicts ROS rates + remaining PA for the latest weekly snapshot per player in `--year`. Writes `data/projections/ros_mtl_{year}.csv` with median + p05/p95 per stat and convenience ROS count estimates. |
 
 ### 7.2 Current Reporting Outputs
 
@@ -322,16 +332,18 @@ MTL is **2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RM
 - Target winsorization (H13): -0.11% — negligible effect
 - Stat-specific aging curves (H14): +0.00% — excluded (no benefit on small dataset)
 
-**ROS (rest-of-season)** — pooled mean RMSE across 2023-2025 weekly snapshots at each PA checkpoint (n ~ player-weeks per system; `phase2` drops rows outside its training schema):
+**ROS (rest-of-season)** — pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint, with Phase 2/3 trained on the backfilled 2016-2022 snapshots (all systems scored on identical rows; 2025 eval pending — Phase 3 was never trained for it):
 
-| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 |
-| ------------- | ---------- | --------- | ----------- | -------------------- | ------ |
-| 50            | 0.0591     | 0.0309    | 0.0313      | **0.0303**           | 0.0314 |
-| 100           | 0.0481     | 0.0312    | 0.0322      | **0.0307**           | 0.0321 |
-| 200           | 0.0418     | 0.0340    | 0.0346      | **0.0332**           | 0.0348 |
-| 400           | 0.0414     | 0.0386    | 0.0387      | **0.0376**           | 0.0401 |
+| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 | Phase3 |
+| ------------- | ---------- | --------- | ----------- | -------------------- | ------ | ------ |
+| 50            | 0.0586     | 0.0313    | 0.0318      | **0.0311**           | 0.0319 | 0.0338 |
+| 100           | 0.0484     | 0.0317    | 0.0328      | **0.0319**           | 0.0335 | 0.0357 |
+| 200           | 0.0425     | 0.0351    | 0.0357      | **0.0349**           | 0.0375 | 0.0424 |
+| 400           | 0.0421     | 0.0391    | 0.0394      | **0.0387**           | 0.0418 | 0.0528 |
 
-Shrinkage wins at every PA checkpoint. Phase 2 underperforms by ~4-6% — consistent with the plan's risk mitigation: the ~27k cutoff rows from 2023-2025 snapshots are insufficient for a 6×5-quantile MTL. Most-likely unlock is backfilling weekly snapshots to 2016-2022 (needs BRef + Statcast re-fetch).
+Mean pinball (quantile loss) at 50/100/200/400 PA: shrinkage **0.0078/0.0081/0.0092/0.0108**, Phase 2 0.0082/0.0087/0.0099/0.0113, Phase 3 0.0091/0.0103/0.0127/0.0154.
+
+Shrinkage wins every checkpoint on both metrics. Phase 2's gap (+7% pinball at 100 PA) is partly the poisoned SB task (§3.2) — excluding SB it reaches parity at 50-100 PA and even wins 50 PA RMSE (0.0338 vs 0.0347). Phase 3 fails its gate outright: +19-28% pinball vs Phase 2 (gate required ≥3% better), worst PIT calibration (max coverage deviation 0.61 vs shrinkage's 0.21), and worse than Phase 2 even ex-SB — the recurrent model hurts at this data scale, as the plan's risk table anticipated. Both stay parked; reactivation steps in §5.3.
 
 ### 7.4 CLI Reference
 
@@ -348,13 +360,15 @@ uv run python -m src.data.fetch_projections --year 2026 --systems steamer zips  
 
 # Weekly snapshot data layer (in-season ROS pipeline, Phase 1)
 uv run python -m src.data.fetch_game_logs --seasons 2016-2026            # BRef per-(batter, ISO-week) batting logs
+uv run python -m src.data.fetch_game_logs --seasons 2016-2022 --source statcast  # Statcast-derived fallback (SB/CS undercount, §3.2)
 uv run python -m src.data.build_snapshots --seasons 2016-2026            # Merge weekly BRef + Statcast → weekly_snapshots_{year}.parquet
 
-# ROS benchmark (PA checkpoints 50/100/200/400)
+# ROS benchmark (PA checkpoints 50/100/200/400; phase3 is parked → opt-in only)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025                             # persist_observed only (no retraining)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain                   # + frozen_preseason, marcel_blend, shrinkage, phase2 (retrains MTL + Phase 2 ensemble per year)
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --include shrinkage frozen_preseason marcel_blend  # skip phase2 for faster runs
-uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --pit-plot        # + PIT histograms for distributional baselines (shrinkage, phase2)
+uv run python scripts/benchmark_ros.py --years 2023 2024 --retrain --include persist_observed frozen_preseason marcel_blend shrinkage phase2 phase3  # reactivate parked phase3
+uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --pit-plot        # + PIT histograms for distributional baselines
 uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --fit-shrinkage-tau         # fit per-stat τ₀ via leave-one-year-out cross-fitting (needs >= 2 eval years)
 
 # Preseason training
@@ -365,12 +379,17 @@ uv run python -m src.models.mtl.train --config configs/mtl.yaml --backtest --dev
 uv run python -m src.models.mtl_ros.train --config configs/mtl_ros.yaml                 # full train + eval
 uv run python -m src.models.mtl_ros.train --config configs/mtl_ros.yaml --smoke         # CI smoke test (tiny epochs/seeds)
 
+# Phase 3 ROS GRU training (standalone, parked — see §5.3)
+uv run python -m src.models.ros.train --config configs/ros.yaml                         # full train + eval
+uv run python -m src.models.ros.train --config configs/ros.yaml --smoke --device cpu    # CI smoke test
+
 # Generate 2026 projections
 uv run python scripts/generate_projections.py                          # Preseason MTL projections
 uv run python scripts/generate_projections.py --retrain                # Retrain from scratch
 uv run python scripts/generate_projections.py --with-public            # Compare with public projections
 uv run python scripts/generate_projections.py --fetch-public           # Fetch + compare in one step
 uv run python scripts/generate_ros_projections.py --year 2026          # Phase 2 ROS projections → data/projections/ros_mtl_2026.csv
+uv run python scripts/generate_ros_projections.py --year 2026 --model phase3  # parked Phase 3 GRU instead (opt-in)
 
 # Benchmark vs public projections (multi-year rolling evaluation)
 uv run python scripts/benchmark_vs_public.py                                 # Full 2022-2025 benchmark
@@ -395,7 +414,8 @@ baseball-hydra/
 ├── configs/
 │   ├── data.yaml                      # Data pipeline config
 │   ├── mtl.yaml                       # Preseason MTL config
-│   └── mtl_ros.yaml                   # Phase 2 ROS quantile MTL config
+│   ├── mtl_ros.yaml                   # Phase 2 ROS quantile MTL config
+│   └── ros.yaml                       # Phase 3 ROS GRU config (parked)
 ├── data/
 │   ├── .gitignore                     # Ignores *.parquet, *.csv, *.pkl, *.pt, *.json, *.png, *.npz
 │   ├── raw/                           # Per-year cached parquet files (+ weekly snapshots)
@@ -403,7 +423,7 @@ baseball-hydra/
 │   ├── models/                        # Trained model artifacts (mtl/, mtl_ros_quantile/)
 │   ├── reports/                       # Evaluation report JSON files
 │   │   ├── benchmark/                 # Multi-year benchmark vs public projections
-│   │   └── benchmark_ros/             # ROS benchmark outputs + preseason/ + phase2/ caches
+│   │   └── benchmark_ros/             # ROS benchmark outputs + preseason/ + phase2/ + phase3/ caches
 │   └── projections/                   # Preseason + ROS projection CSVs
 ├── src/
 │   ├── __init__.py
@@ -443,13 +463,19 @@ baseball-hydra/
 │   │   │   ├── loss.py                # Huber + Kendall uncertainty weighting
 │   │   │   ├── dataset.py             # PyTorch Dataset
 │   │   │   └── train.py               # CLI: holdout/backtest preseason MTL
-│   │   └── mtl_ros/                   # Phase 2 ROS quantile MTL
+│   │   ├── mtl_ros/                   # Phase 2 ROS quantile MTL
+│   │   │   ├── __init__.py
+│   │   │   ├── model.py               # MTLQuantileNetwork + Forecaster + Ensemble (per-quantile mean + sort)
+│   │   │   ├── loss.py                # MultiTaskQuantileLoss: pinball + Kendall + MSE/GaussianNLL PA head
+│   │   │   ├── dataset.py             # compute_sample_weights (recency × √(ros_pa+1))
+│   │   │   ├── splits.py              # walk_forward_split (atomic (mlbam_id, season))
+│   │   │   └── train.py               # train_ros() + CLI + smoke test
+│   │   └── ros/                       # Phase 3 ROS GRU (parked — see §5.3)
 │   │       ├── __init__.py
-│   │       ├── model.py               # MTLQuantileNetwork + Forecaster + Ensemble (per-quantile mean + sort)
-│   │       ├── loss.py                # MultiTaskQuantileLoss: pinball + Kendall + MSE/GaussianNLL PA head
-│   │       ├── dataset.py             # compute_sample_weights (recency × √(ros_pa+1))
-│   │       ├── splits.py              # walk_forward_split (atomic (mlbam_id, season))
-│   │       └── train.py               # train_ros() + CLI + smoke test
+│   │       ├── model.py               # ROSSequenceNetwork + Forecaster + Ensemble
+│   │       ├── features.py            # 27 weekly seq_* features (mech/plate/outcome)
+│   │       ├── dataset.py             # Cutoff-sliced sequence dataset + sample weights
+│   │       └── train.py               # train_ros_sequence() + CLI + smoke test
 │   └── eval/
 │       ├── __init__.py
 │       ├── metrics.py                 # RMSE, MAE, R², MAPE
@@ -459,9 +485,9 @@ baseball-hydra/
 │       └── plots.py                   # Calibration, residual, PIT histograms, comparison plots
 ├── scripts/
 │   ├── generate_projections.py        # Generate next-season preseason projections
-│   ├── generate_ros_projections.py    # Generate current-season ROS projections (Phase 2)
+│   ├── generate_ros_projections.py    # Generate current-season ROS projections (Phase 2 default, --model phase3 opt-in)
 │   ├── benchmark_vs_public.py         # Multi-year rolling benchmark vs public projections
-│   ├── benchmark_ros.py               # Rolling ROS benchmark at PA checkpoints (incl. Phase 2 baseline)
+│   ├── benchmark_ros.py               # Rolling ROS benchmark at PA checkpoints (phase2 default, phase3 opt-in)
 │   └── run_ablation.py                # Ablation study for preseason MTL config variants
 └── tests/
     ├── __init__.py
@@ -477,6 +503,11 @@ baseball-hydra/
     ├── test_ros_metrics.py            # ROS metrics (pinball, PIT, PA checkpoints)
     ├── test_benchmark_ros.py          # ROS benchmark baselines + evaluation flow
     ├── test_benchmark_ros_phase2.py   # Phase 2 baseline integration into benchmark
+    ├── test_benchmark_ros_phase3.py   # Phase 3 baseline integration into benchmark
+    ├── test_ros_sequence_features.py  # Phase 3 weekly seq_* feature derivations
+    ├── test_ros_sequence_dataset.py   # Phase 3 cutoff-sliced sequences (no future leakage)
+    ├── test_ros_sequence_model.py     # ROSSequenceNetwork + Forecaster + Ensemble
+    ├── test_ros_sequence_train.py     # train_ros_sequence() end-to-end on synthetic snapshots
     ├── test_mtl_ros_model.py          # MTLQuantileNetwork + Forecaster + Ensemble
     ├── test_mtl_ros_loss.py           # MultiTaskQuantileLoss (pinball, Kendall, PA head)
     ├── test_mtl_ros_dataset.py        # compute_sample_weights recency × √(ros_pa+1)
@@ -508,6 +539,7 @@ Required test coverage:
 - **In-season features**: trail4w rate derivation matches snapshot formulas, NaN preservation, column ordering matches registry
 - **Model smoke tests**: train on tiny synthetic data, verify output shapes and types, checkpoint save/load roundtrip
 - **Phase 2 MTL ROS**: quantile output shapes, pinball+Kendall loss math, walk-forward split atomic units + leakage assertion, sample-weight mean-normalization, end-to-end `train_ros` on synthetic snapshots, benchmark `phase2` baseline integration
+- **Phase 3 ROS GRU**: weekly `seq_*` feature derivations, cutoff-sliced sequences (no post-cutoff weeks), network/forecaster/ensemble shapes + save/load, end-to-end `train_ros_sequence` on synthetic snapshots, benchmark `phase3` baseline integration, Statcast weekly batting fallback (incl. leakage guard on season-total calibration)
 - **Evaluation**: metric computation against known values, ROS pinball/PIT, PA-checkpoint row selection, shrinkage posterior math + tau fitting + quantiles
 - **Plots and predictions**: plot functions return correct Figure objects, prediction helpers
 
