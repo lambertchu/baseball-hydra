@@ -477,6 +477,69 @@ def _load_season_batting_totals(year: int, raw_dir: Path) -> pd.DataFrame | None
     return totals
 
 
+def validate_weekly_counting_coverage(
+    weekly: pd.DataFrame,
+    season_totals: pd.DataFrame | None,
+    season: int,
+    stats: tuple[str, ...] = ("r", "rbi", "sb", "cs"),
+    warn_below: float = 0.8,
+) -> dict[str, float]:
+    """Coverage of summed weekly counting stats vs local season totals.
+
+    Returns ``{stat: weekly_sum / season_total}`` computed over players
+    present in both frames. Coverage far below 1.0 means the weekly source is
+    dropping events — the Statcast-derived 2016-2022 backfill carried only
+    ~6% of SB/CS and poisoned Phase 2/3 training targets silently (CLAUDE.md
+    §3.2). Logs a WARNING per stat under ``warn_below``; never raises, and
+    returns ``{}`` when season totals are unavailable.
+    """
+    coverage: dict[str, float] = {}
+    if (
+        weekly.empty
+        or season_totals is None
+        or "mlbam_id" not in weekly.columns
+        or "mlbam_id" not in season_totals.columns
+    ):
+        return coverage
+
+    present = [s for s in stats if s in weekly.columns]
+    if not present:
+        return coverage
+    totals = season_totals.drop_duplicates("mlbam_id").set_index("mlbam_id")
+    weekly_sums = weekly.groupby("mlbam_id")[present].sum()
+    shared = weekly_sums.index.intersection(totals.index)
+    if shared.empty:
+        return coverage
+
+    for stat in present:
+        if stat not in totals.columns:
+            continue
+        denom = float(
+            pd.to_numeric(totals.loc[shared, stat], errors="coerce").fillna(0).sum()
+        )
+        if denom <= 0:
+            continue
+        ratio = float(weekly_sums.loc[shared, stat].sum()) / denom
+        coverage[stat] = ratio
+        if ratio < warn_below:
+            logger.warning(
+                "%d weekly '%s' sums to %.0f%% of season totals (threshold "
+                "%.0f%%) — the weekly source is dropping events; do not train "
+                "on this column (see CLAUDE.md §3.2).",
+                season,
+                stat,
+                ratio * 100,
+                warn_below * 100,
+            )
+    if coverage:
+        logger.info(
+            "%d weekly counting coverage vs season totals: %s",
+            season,
+            {k: round(v, 3) for k, v in coverage.items()},
+        )
+    return coverage
+
+
 def fetch_batter_weekly_stats_from_statcast(
     year: int,
     out_dir: str | Path = "data/raw",
@@ -542,6 +605,7 @@ def fetch_batter_weekly_stats_from_statcast(
             )
     if totals is not None and calibrate_season_totals:
         weekly = _overlay_scaled_season_totals(weekly, totals)
+    validate_weekly_counting_coverage(weekly, totals, season=year)
 
     for col in ("name", "age", "team"):
         if col not in weekly.columns:
@@ -603,6 +667,8 @@ def fetch_batter_weekly_stats(
     force: bool = False,
     delay: float = 2.0,
     min_pa: int = 1,
+    retries: int = 3,
+    retry_backoff: float = 30.0,
 ) -> Path:
     """Fetch per-(batter, ISO-week) batting stats for one season and save.
 
@@ -622,6 +688,13 @@ def fetch_batter_weekly_stats(
     min_pa:
         Minimum PA per (batter, week) to retain (default 1; weeks with zero
         playing time are dropped naturally).
+    retries:
+        Per-week retry attempts after the first failure. BRef soft-throttles
+        sustained scraping with table-less responses; without retries one
+        transient week aborts the whole season pass.
+    retry_backoff:
+        Base seconds to wait before retry ``n`` (waits ``retry_backoff * n``),
+        long enough to sit out a throttle window.
 
     Returns
     -------
@@ -659,13 +732,31 @@ def fetch_batter_weekly_stats(
             "  [%d/%d] %d-W%02d  %s..%s",
             i, len(weeks), iso_year, iso_week, wstart, wend,
         )
-        try:
-            raw = pb.batting_stats_range(
-                start_dt=wstart.isoformat(),
-                end_dt=wend.isoformat(),
-            )
-        except Exception:
-            logger.exception("  Failed week %d-W%02d", iso_year, iso_week)
+        raw = None
+        week_failed = True
+        for attempt in range(1, retries + 2):
+            try:
+                raw = pb.batting_stats_range(
+                    start_dt=wstart.isoformat(),
+                    end_dt=wend.isoformat(),
+                )
+                week_failed = False
+                break
+            except Exception:
+                if attempt <= retries:
+                    wait = retry_backoff * attempt
+                    logger.warning(
+                        "  Week %d-W%02d attempt %d/%d failed; retrying in %.0fs",
+                        iso_year, iso_week, attempt, retries + 1, wait,
+                    )
+                    if wait > 0:
+                        time.sleep(wait)
+                else:
+                    logger.exception(
+                        "  Failed week %d-W%02d after %d attempts",
+                        iso_year, iso_week, retries + 1,
+                    )
+        if week_failed:
             failed.append((iso_year, iso_week))
             if delay > 0:
                 time.sleep(delay)
@@ -730,6 +821,13 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=2.0, metavar="SEC")
     parser.add_argument("--min-pa", type=int, default=1, metavar="PA")
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Per-week retry attempts for --source bref (throttle resilience)",
+    )
+    parser.add_argument(
         "--source",
         choices=["bref", "statcast"],
         default="bref",
@@ -767,6 +865,7 @@ def main() -> None:
                     force=args.force,
                     delay=args.delay,
                     min_pa=args.min_pa,
+                    retries=args.retries,
                 )
         except Exception:
             logger.exception("Failed to fetch %d", year)

@@ -37,6 +37,7 @@ from src.data.fetch_game_logs import (
     fetch_batter_weekly_stats,
     fetch_batter_weekly_stats_from_statcast,
     iso_weeks_in_season,
+    validate_weekly_counting_coverage,
 )
 from src.data.fetch_statcast import _aggregate_batter_statcast_weekly
 
@@ -917,7 +918,116 @@ class TestFetchGameLogsFailsHard:
              patch.dict("sys.modules", {"pybaseball": fake_pb}):
             with pytest.raises(RuntimeError, match="Failed to fetch"):
                 fetch_batter_weekly_stats(
-                    2024, out_dir=tmp_path, delay=0.0,
+                    2024, out_dir=tmp_path, delay=0.0, retries=0,
                 )
 
         assert not (tmp_path / "batting_week_2024.parquet").exists()
+
+    def test_transient_week_error_recovers_with_retries(self, tmp_path):
+        """One flaky attempt must not abort the season when retries remain —
+        BRef soft-throttles sustained scraping with table-less responses."""
+        seen: set[str] = set()
+
+        def flaky_batting_stats_range(start_dt, end_dt):
+            if start_dt not in seen:
+                seen.add(start_dt)
+                if len(seen) == 2:  # first attempt of the 2nd week only
+                    raise RuntimeError("Simulated transient BRef failure")
+            return pd.DataFrame({
+                "Name": ["A"], "Lev": ["Maj-AL"],
+                "PA": ["10"], "mlbID": ["1"],
+            })
+
+        fake_pb = type(
+            "FakePB",
+            (),
+            {"batting_stats_range": staticmethod(flaky_batting_stats_range)},
+        )()
+
+        short_dates = {2024: ("2024-04-08", "2024-04-28")}
+        with patch("src.data.fetch_game_logs._SEASON_DATES", short_dates), \
+             patch.dict("sys.modules", {"pybaseball": fake_pb}):
+            out = fetch_batter_weekly_stats(
+                2024, out_dir=tmp_path, delay=0.0, retries=2, retry_backoff=0.0,
+            )
+
+        assert out.exists()
+        df = pd.read_parquet(out)
+        assert df["iso_week"].nunique() >= 3  # all weeks present, incl. retried one
+
+
+class TestValidateWeeklyCountingCoverage:
+    """Lossy weekly sources must be flagged before they reach training data."""
+
+    @staticmethod
+    def _weekly(sb_per_week: int) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "mlbam_id": [1, 1, 2, 2],
+                "iso_week": [14, 15, 14, 15],
+                "r": [5, 5, 4, 4],
+                "rbi": [4, 4, 3, 3],
+                "sb": [sb_per_week] * 4,
+                "cs": [1, 0, 0, 1],
+            }
+        )
+
+    @staticmethod
+    def _totals() -> pd.DataFrame:
+        # Season totals matching the full-coverage weekly frame above.
+        return pd.DataFrame(
+            {
+                "mlbam_id": [1, 2],
+                "r": [10, 8],
+                "rbi": [8, 6],
+                "sb": [10, 10],
+                "cs": [1, 1],
+            }
+        )
+
+    def test_full_coverage_no_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="src.data.fetch_game_logs"):
+            cov = validate_weekly_counting_coverage(
+                self._weekly(sb_per_week=5), self._totals(), season=2019
+            )
+        assert cov["sb"] == pytest.approx(1.0)
+        assert cov["r"] == pytest.approx(1.0)
+        assert not caplog.records
+
+    def test_low_sb_coverage_warns(self, caplog):
+        # 4 weekly SB vs 20 season SB = 20% coverage — the 2016-2022
+        # Statcast-derived defect shape.
+        with caplog.at_level("WARNING", logger="src.data.fetch_game_logs"):
+            cov = validate_weekly_counting_coverage(
+                self._weekly(sb_per_week=1), self._totals(), season=2016
+            )
+        assert cov["sb"] == pytest.approx(0.2)
+        warnings = [r for r in caplog.records if "sb" in r.getMessage()]
+        assert warnings, "expected a WARNING for the sb column"
+        assert "2016" in warnings[0].getMessage()
+
+    def test_missing_totals_returns_empty(self):
+        assert validate_weekly_counting_coverage(
+            self._weekly(5), None, season=2019
+        ) == {}
+
+    def test_empty_weekly_returns_empty(self):
+        assert validate_weekly_counting_coverage(
+            pd.DataFrame(), self._totals(), season=2019
+        ) == {}
+
+    def test_players_missing_from_totals_are_ignored(self):
+        weekly = self._weekly(5)
+        weekly.loc[weekly["mlbam_id"] == 2, "mlbam_id"] = 99  # not in totals
+        cov = validate_weekly_counting_coverage(weekly, self._totals(), season=2019)
+        # Only player 1 is shared: 10 weekly sb vs 10 season sb.
+        assert cov["sb"] == pytest.approx(1.0)
+
+    def test_zero_season_total_stat_is_skipped(self):
+        totals = self._totals()
+        totals["cs"] = 0
+        cov = validate_weekly_counting_coverage(
+            self._weekly(5), totals, season=2019
+        )
+        assert "cs" not in cov
+        assert "sb" in cov

@@ -30,6 +30,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.data.fetch_game_logs import (
+    _load_season_batting_totals,
+    validate_weekly_counting_coverage,
+)
 from src.data.fetch_statcast import _parse_season_tokens, fetch_statcast_weekly
 from src.data.rate_helpers import obp_slg as _obp_slg
 from src.data.rate_helpers import safe_div as _safe_div
@@ -327,6 +331,14 @@ def build_weekly_snapshots(
             f"--seasons {year}"
         )
     batting_wk = _derive_singles(pd.read_parquet(batting_path))
+    # Guard against lossy weekly sources feeding training data — the
+    # Statcast-derived 2016-2022 backfill shipped ~6% SB/CS coverage and
+    # poisoned Phase 2/3 SB targets without a single warning.
+    validate_weekly_counting_coverage(
+        batting_wk,
+        _load_season_batting_totals(year, raw_dir),
+        season=year,
+    )
 
     statcast_path = raw_dir / f"statcast_agg_week_{year}.parquet"
     raw_statcast_path = raw_dir / f"statcast_raw_{year}.parquet"
