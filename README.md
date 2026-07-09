@@ -37,7 +37,7 @@ Pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint (Phase 
 | 200           | 0.0425     | 0.0351    | 0.0357      | **0.0349**           | 0.0375          | 0.0424          |
 | 400           | 0.0421     | 0.0391    | 0.0394      | **0.0387**           | 0.0418          | 0.0528          |
 
-The closed-form Bayesian shrinkage baseline wins every PA checkpoint. Two neural challengers are fully implemented and tested but parked after failing their go/no-go gates: the Phase 2 quantile-head MTL (`src/models/mtl_ros/`, +7% pooled pinball vs shrinkage — reaches parity when the SB task, poisoned by a known defect in the Statcast-derived 2016-2022 weekly logs, is excluded) and the Phase 3 sequential GRU (`src/models/ros/`, +19-28% pinball vs Phase 2 with the worst calibration). Both are opt-in only; see `CLAUDE.md` §5.3 and §7.3 for details and reactivation commands.
+The closed-form Bayesian shrinkage baseline wins every PA checkpoint. Two neural challengers are fully implemented and tested but parked after failing their go/no-go gates: the Phase 2 quantile-head MTL (`src/models/mtl_ros/`, +7% pooled pinball vs shrinkage — reaches parity excluding the SB task, whose 2016-2022 training data was defective at benchmark time and has since been re-sourced from Baseball Reference) and the Phase 3 sequential GRU (`src/models/ros/`, +19-28% pinball vs Phase 2 with the worst calibration). Both are opt-in only; see `CLAUDE.md` §5.3 and §7.3 for details, the data-defect note, and reactivation commands.
 
 ## Prerequisites
 
