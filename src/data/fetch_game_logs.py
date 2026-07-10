@@ -460,7 +460,7 @@ def _overlay_scaled_season_totals(
     return out
 
 
-def _load_season_batting_totals(year: int, raw_dir: Path) -> pd.DataFrame | None:
+def load_season_batting_totals(year: int, raw_dir: Path) -> pd.DataFrame | None:
     batting_path = raw_dir / f"batting_{year}.parquet"
     if not batting_path.exists():
         return None
@@ -506,7 +506,12 @@ def validate_weekly_counting_coverage(
     if not present:
         return coverage
     totals = season_totals.drop_duplicates("mlbam_id").set_index("mlbam_id")
-    weekly_sums = weekly.groupby("mlbam_id")[present].sum()
+    # Coerce before summing: an object-dtype column would otherwise
+    # string-concatenate under groupby().sum() and break the no-raise contract.
+    numeric = weekly[["mlbam_id", *present]].copy()
+    for stat in present:
+        numeric[stat] = pd.to_numeric(numeric[stat], errors="coerce").fillna(0)
+    weekly_sums = numeric.groupby("mlbam_id")[present].sum()
     shared = weekly_sums.index.intersection(totals.index)
     if shared.empty:
         return coverage
@@ -592,7 +597,7 @@ def fetch_batter_weekly_stats_from_statcast(
     if "pa" in weekly.columns:
         weekly = weekly.loc[weekly["pa"].fillna(0) >= min_pa].copy()
 
-    totals = _load_season_batting_totals(year, out_dir)
+    totals = load_season_batting_totals(year, out_dir)
     if totals is not None:
         meta_cols = [c for c in ("mlbam_id", "name", "age", "team") if c in totals]
         if meta_cols:
@@ -721,6 +726,10 @@ def fetch_batter_weekly_stats(
     if out_path.exists() and not force:
         logger.info("Skipping %d — file already exists at %s", year, out_path)
         return out_path
+
+    # A negative value would make the attempt loop empty and every week
+    # "fail" without a single request.
+    retries = max(0, retries)
 
     weeks = iso_weeks_in_season(year)
     logger.info("Fetching %d ISO weeks for %d", len(weeks), year)

@@ -31,7 +31,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.data.fetch_game_logs import (
-    _load_season_batting_totals,
+    load_season_batting_totals,
     validate_weekly_counting_coverage,
 )
 from src.data.fetch_statcast import _parse_season_tokens, fetch_statcast_weekly
@@ -336,7 +336,7 @@ def build_weekly_snapshots(
     # poisoned Phase 2/3 SB targets without a single warning.
     validate_weekly_counting_coverage(
         batting_wk,
-        _load_season_batting_totals(year, raw_dir),
+        load_season_batting_totals(year, raw_dir),
         season=year,
     )
 

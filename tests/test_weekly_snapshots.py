@@ -1031,3 +1031,45 @@ class TestValidateWeeklyCountingCoverage:
         )
         assert "cs" not in cov
         assert "sb" in cov
+
+    def test_non_numeric_column_is_coerced_not_raised(self):
+        # object-dtype stat columns must not break the no-raise contract:
+        # unparseable values coerce to 0 and simply lower coverage.
+        weekly = self._weekly(5)
+        weekly["sb"] = ["5", "5", "5", "x"]  # object dtype, one bad value
+        cov = validate_weekly_counting_coverage(weekly, self._totals(), season=2019)
+        assert cov["sb"] == pytest.approx(15 / 20)
+        assert cov["r"] == pytest.approx(1.0)
+
+
+class TestFetchGameLogsNegativeRetries:
+    """retries < 0 must behave like retries=0, not skip every attempt."""
+
+    def test_negative_retries_still_attempts_each_week(self, tmp_path):
+        calls = {"n": 0}
+
+        def flaky_batting_stats_range(start_dt, end_dt):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("Simulated transient BRef failure")
+            return pd.DataFrame({
+                "Name": ["A"], "Lev": ["Maj-AL"],
+                "PA": ["10"], "mlbID": ["1"],
+            })
+
+        fake_pb = type(
+            "FakePB",
+            (),
+            {"batting_stats_range": staticmethod(flaky_batting_stats_range)},
+        )()
+
+        short_dates = {2024: ("2024-04-08", "2024-04-28")}
+        with patch("src.data.fetch_game_logs._SEASON_DATES", short_dates), \
+             patch.dict("sys.modules", {"pybaseball": fake_pb}):
+            with pytest.raises(RuntimeError, match=r"Failed to fetch 1 week"):
+                fetch_batter_weekly_stats(
+                    2024, out_dir=tmp_path, delay=0.0, retries=-5,
+                )
+
+        # every week got its single attempt (3 ISO weeks in the window)
+        assert calls["n"] == 3
