@@ -28,16 +28,16 @@ Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
 
 ### How the ROS pipeline stacks up
 
-Pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint (Phase 2/3 trained on backfilled 2016-2022 snapshots):
+Pooled mean RMSE across 2023-2025 weekly snapshots at each PA checkpoint (Phase 2 trained on BRef-sourced 2016-2022 backfill):
 
-| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 (parked) | Phase3 (parked) |
-| ------------- | ---------- | --------- | ----------- | -------------------- | --------------- | --------------- |
-| 50            | 0.0586     | 0.0313    | 0.0318      | **0.0311**           | 0.0319          | 0.0338          |
-| 100           | 0.0484     | 0.0317    | 0.0328      | **0.0319**           | 0.0335          | 0.0357          |
-| 200           | 0.0425     | 0.0351    | 0.0357      | **0.0349**           | 0.0375          | 0.0424          |
-| 400           | 0.0421     | 0.0391    | 0.0394      | **0.0387**           | 0.0418          | 0.0528          |
+| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 (parked) |
+| ------------- | ---------- | --------- | ----------- | -------------------- | --------------- |
+| 50            | 0.0591     | 0.0309    | 0.0313      | **0.0307**           | 0.0310          |
+| 100           | 0.0481     | 0.0312    | 0.0322      | **0.0312**           | 0.0318          |
+| 200           | 0.0418     | 0.0340    | 0.0346      | **0.0337**           | 0.0351          |
+| 400           | 0.0414     | 0.0386    | 0.0387      | **0.0380**           | 0.0401          |
 
-The closed-form Bayesian shrinkage baseline wins every PA checkpoint. Two neural challengers are fully implemented and tested but parked after failing their go/no-go gates: the Phase 2 quantile-head MTL (`src/models/mtl_ros/`, +7% pooled pinball vs shrinkage — reaches parity excluding the SB task, whose 2016-2022 training data was defective at benchmark time and has since been re-sourced from Baseball Reference) and the Phase 3 sequential GRU (`src/models/ros/`, +19-28% pinball vs Phase 2 with the worst calibration). Both are opt-in only; see `CLAUDE.md` §5.3 and §7.3 for details, the data-defect note, and reactivation commands.
+The closed-form Bayesian shrinkage baseline wins every checkpoint on quantile loss. Two neural challengers are fully implemented and tested but parked after failing their go/no-go gates: the Phase 2 quantile-head MTL (`src/models/mtl_ros/`, now within +0.8-3.0% pooled pinball of shrinkage after the 2016-2022 SB data fix, but never ahead) and the Phase 3 sequential GRU (`src/models/ros/`, +19-28% pinball vs Phase 2 with the worst calibration, measured pre-fix). Both are opt-in only; see `CLAUDE.md` §5.3 and §7.3 for details and reactivation commands.
 
 ## Prerequisites
 

@@ -232,12 +232,12 @@ The project has one production track and two parked in-season experiments: the p
 - Sample weights = `exp(-λΔseason) × √(ros_pa+1)`, mean-normalized — down-weights tiny-denominator rows, up-weights longer horizons.
 - Preseason features are joined from `merged_batter_data.parquet` on `(mlbam_id, season)`; `team_stats` is **disabled** by default because the stored values are end-of-season totals and would leak future info into mid-season rows.
 - Config: `configs/mtl_ros.yaml`.
-- **Status**: parked — fails the go/no-go gate even after the 2016-2022 snapshot backfill (~54-72k training cutoffs per eval year). Pooled 2023-2024: **0.0087 mean pinball at 100 PA vs shrinkage's 0.0081 (+7%)**. The backfill did help (-3.2% same-year pinball on eval-2024, -6.5% excluding SB), and excluding the SB task (training-data defect, since fixed — §3.2) Phase 2 is at parity with shrinkage at 50-100 PA — but parity doesn't clear the gate. A re-benchmark on the repaired SB data is pending. Shrinkage remains the production ROS system.
+- **Status**: parked, but close — on the BRef-clean backfill (~54-72k training cutoffs per eval year) the pooled 2023-2025 pinball gap to shrinkage is **+0.8% at 50 PA / +2.1% at 100 / +3.0% at 200 / +1.5% at 400** (was +7% on the defective SB data), with a first outright win on eval-2023 at 100 PA. The gate requires beating shrinkage on pooled quantile loss, which it still does at no checkpoint, so shrinkage remains the production ROS system.
 
 ### 5.3 Phase 3 ROS GRU — `src/models/ros/` (sequential, parked)
 
 - Three per-week feature encoders (mechanics / plate discipline / outcome, 27 `seq_*` columns from `*_week` snapshot data) → 1-layer GRU(128) → precision-weighted blend with a frozen Phase 2 seed_0 base, reusing its quantile decoder. Config: `configs/ros.yaml` (includes a `min_snapshot_years: 7` backfill gate).
-- **Status: parked — decisively fails its gate** (needed ≥3% better pooled pinball than Phase 2 + improved calibration). Pooled 2023-2024: **+19% pinball vs Phase 2 at 100 PA, +28% at 200 PA, +27-38% vs shrinkage**, worst PIT calibration (max coverage deviation 0.61), and still worse than Phase 2 with the (then-defective, §3.2) SB task excluded. Error grows with the season (mean RMSE 0.034→0.053 from 50→400 PA) — the recurrent path hurts at this data scale, as the plan's risk table predicted.
+- **Status: parked — decisively fails its gate** (needed ≥3% better pooled pinball than Phase 2 + improved calibration). Pooled 2023-2024, measured pre-SB-fix and not re-benchmarked since: **+19% pinball vs Phase 2 at 100 PA, +28% at 200 PA, +27-38% vs shrinkage**, worst PIT calibration (max coverage deviation 0.61), and still worse than Phase 2 with the (then-defective, §3.2) SB task excluded. Error grows with the season (mean RMSE 0.034→0.053 from 50→400 PA) — the recurrent path hurts at this data scale, as the plan's risk table predicted.
 - **Not active anywhere by default**: `benchmark_ros.py` excludes `phase3` from its default `--include`; `generate_ros_projections.py` defaults to `--model phase2`; nothing in the production shrinkage path touches it.
 - **To reactivate**: `uv run python scripts/benchmark_ros.py --years 2023 2024 2025 --retrain --include persist_observed frozen_preseason marcel_blend shrinkage phase2 phase3` (benchmark), `uv run python scripts/generate_ros_projections.py --year 2026 --model phase3` (projections), or `uv run python -m src.models.ros.train --config configs/ros.yaml` (standalone). Trained per-year ensembles are cached under `data/reports/benchmark_ros/phase3/`. Fix the SB backfill defect (§3.2) before any retry.
 
@@ -279,8 +279,8 @@ Every evaluation run must be compared against the **naive persistence** baseline
 Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, MTL model, holdout/backtest evaluation, 2026 predictions, and public projection benchmarking. The in-season ROS (rest-of-season) pipeline completed all three planned phases; only Phase 1 is production:
 
 - **Phase 1 (production)** — weekly snapshot data layer, ROS evaluation harness, and a closed-form Bayesian shrinkage baseline that blends the preseason MTL prior with observed year-to-date counts. Wins every PA checkpoint (see §7.3).
-- **Phase 2 (parked)** — quantile-head MTL with in-season features, PA-remaining auxiliary head, walk-forward retraining, and multi-seed ensemble. Retrained on the backfilled 2016-2022 snapshots it improved, but still **fails the go/no-go gate** (+7% pooled pinball vs shrinkage at 100 PA; parity only excluding the SB task, whose training data was defective at benchmark time — §3.2, since fixed). See §5.2.
-- **Phase 3 (parked)** — sequential GRU over weekly features on a frozen Phase 2 base. **Decisively fails its gate** (+19-28% pooled pinball vs Phase 2, worst calibration). Not active in any default path; see §5.3 for the verdict and reactivation commands.
+- **Phase 2 (parked)** — quantile-head MTL with in-season features, PA-remaining auxiliary head, walk-forward retraining, and multi-seed ensemble. On the BRef-clean backfill it closes to **+0.8-3.0% pooled pinball vs shrinkage** (2023-2025) but beats it at no checkpoint, so the gate stays unmet. See §5.2.
+- **Phase 3 (parked)** — sequential GRU over weekly features on a frozen Phase 2 base. **Decisively fails its gate** (+19-28% pooled pinball vs Phase 2, worst calibration; measured pre-SB-fix). Not active in any default path; see §5.3 for the verdict and reactivation commands.
 
 ### 7.1 What Was Built
 
@@ -332,18 +332,18 @@ MTL is **2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RM
 - Target winsorization (H13): -0.11% — negligible effect
 - Stat-specific aging curves (H14): +0.00% — excluded (no benefit on small dataset)
 
-**ROS (rest-of-season)** — pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint, with Phase 2/3 trained on the backfilled 2016-2022 snapshots (all systems scored on identical rows; 2025 eval pending — Phase 3 was never trained for it):
+**ROS (rest-of-season)** — pooled mean RMSE across 2023-2025 weekly snapshots at each PA checkpoint (902 players at 50 PA), with Phase 2 trained on the BRef-clean 2016-2022 backfill (all systems scored on identical rows):
 
-| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 | Phase3 |
-| ------------- | ---------- | --------- | ----------- | -------------------- | ------ | ------ |
-| 50            | 0.0586     | 0.0313    | 0.0318      | **0.0311**           | 0.0319 | 0.0338 |
-| 100           | 0.0484     | 0.0317    | 0.0328      | **0.0319**           | 0.0335 | 0.0357 |
-| 200           | 0.0425     | 0.0351    | 0.0357      | **0.0349**           | 0.0375 | 0.0424 |
-| 400           | 0.0421     | 0.0391    | 0.0394      | **0.0387**           | 0.0418 | 0.0528 |
+| PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 |
+| ------------- | ---------- | --------- | ----------- | -------------------- | ------ |
+| 50            | 0.0591     | 0.0309    | 0.0313      | **0.0307**           | 0.0310 |
+| 100           | 0.0481     | 0.0312    | 0.0322      | **0.0312**           | 0.0318 |
+| 200           | 0.0418     | 0.0340    | 0.0346      | **0.0337**           | 0.0351 |
+| 400           | 0.0414     | 0.0386    | 0.0387      | **0.0380**           | 0.0401 |
 
-Mean pinball (quantile loss) at 50/100/200/400 PA: shrinkage **0.0078/0.0081/0.0092/0.0108**, Phase 2 0.0082/0.0087/0.0099/0.0113, Phase 3 0.0091/0.0103/0.0127/0.0154.
+Mean pinball (quantile loss) at 50/100/200/400 PA: shrinkage **0.0076/0.0079/0.0088/0.0106**, Phase 2 0.0077/0.0081/0.0091/0.0107.
 
-Shrinkage wins every checkpoint on both metrics. Phase 2's gap (+7% pinball at 100 PA) is partly the SB training-data defect — excluding SB it reaches parity at 50-100 PA and even wins 50 PA RMSE (0.0338 vs 0.0347). Phase 3 fails its gate outright: +19-28% pinball vs Phase 2 (gate required ≥3% better), worst PIT calibration (max coverage deviation 0.61 vs shrinkage's 0.21), and worse than Phase 2 even ex-SB — the recurrent model hurts at this data scale, as the plan's risk table anticipated. Both stay parked; reactivation steps in §5.3. **Caveat**: these numbers were measured while the 2016-2022 SB training data was defective (§3.2); it has since been re-sourced from BRef, and a clean-data re-benchmark is pending.
+Shrinkage wins every checkpoint on quantile loss (and on RMSE, bar a dead heat with frozen-preseason at 100 PA). The SB data fix cut Phase 2's pooled pinball gap from +7% to **+0.8-3.0%** — including a first outright win on eval-2023 at 100 PA (-1.2%) and SB RMSE recovering from 0.0251 to 0.0145 on that year — but Phase 2 still beats shrinkage at no pooled checkpoint, so its gate stays unmet and it remains parked. Phase 3 was last benchmarked before the SB fix (pooled 2023-2024): +19-28% pinball vs Phase 2, worst PIT calibration (max coverage deviation 0.61) — decisively failed its gate and has not been re-benchmarked since; reactivation steps in §5.3.
 
 ### 7.4 CLI Reference
 
