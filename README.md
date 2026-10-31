@@ -165,6 +165,11 @@ data/
 
 ## Evaluation
 
+The [2026 saved-forecast evaluation](data/reports/preseason_2026/README.md)
+compares Hydra and eight public systems with actual 2026 regular-season results.
+It includes common-player metrics, playing-time and per-PA diagnostics, bootstrap
+intervals, and an offline verification command.
+
 Implemented in `src/eval/`:
 
 - Per-target RMSE, MAE, R², MAPE on chronological test set

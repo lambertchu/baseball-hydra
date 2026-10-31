@@ -1,0 +1,109 @@
+{
+  "year": 2026,
+  "analysis_date": "2026-10-29",
+  "git_commit": "1183b3b7a8a8c6fd0d6d5d5cbaa3ad01f526a00e",
+  "config_sha256": "ea71542af9aa973a9f78f7fbbd3c77a420210210fe984d002d5f2713c524fe03",
+  "script_sha256": "4718d9ea516ce76354e93ecfe4c117f76d4f3ab62cb43ea4e689f7360e55079f",
+  "inputs": [
+    {
+      "path": "data/projections/projections_mtl_2026.csv",
+      "sha256": "aa4ae2f60f7fb6433cae8f6c24abca8588c004ec5acf53368661adf40f70cd6a",
+      "modified_utc": "2026-04-12T05:05:40.639393+00:00"
+    },
+    {
+      "path": "data/projections/projections_vs_external_2026.csv",
+      "sha256": "3bb169356693cb9aa1fb5e477572696ef9c418e969797acd447c7cd2f61d94fe",
+      "modified_utc": "2026-03-29T18:49:41.310045+00:00"
+    },
+    {
+      "path": "data/merged_batter_data.parquet",
+      "sha256": "d33eb4495d08e15c041d589119a7650f657b3cf0f3374e86685bd791ae838a32",
+      "modified_utc": "2026-03-29T18:49:37.354323+00:00"
+    },
+    {
+      "path": "data/raw/batting_2025.parquet",
+      "sha256": "c1ea56d0919030dbd80685637ee3aaf88617732358a7c7bd767deb1530a5f6c3",
+      "modified_utc": "2026-03-29T17:14:18.495994+00:00"
+    },
+    {
+      "path": "data/reports/preseason_2026/fangraphs_actuals_raw.json",
+      "sha256": "71f43364482e47feb20a4f92295da3a133bf9d52571d35a4185927858aa65c0a",
+      "modified_utc": "2026-10-30T03:10:08.692993+00:00"
+    },
+    {
+      "path": "data/reports/preseason_2026/mlb_actuals_raw.json",
+      "sha256": "1c7b86415b27d2fa6724d69ab88c947d5b839583e429f33a475d8a2fa375aabf",
+      "modified_utc": "2026-10-30T03:10:56.912063+00:00"
+    },
+    {
+      "path": "data/external_projections/steamer_2026.csv",
+      "sha256": "d7148811adae26b05cfced1ad41121e6af429b174d987f88ed838034db9283fb",
+      "modified_utc": "2026-03-12T12:06:08+00:00"
+    },
+    {
+      "path": "data/external_projections/zips_2026.csv",
+      "sha256": "274b5b9958b2e4658a9eade01710f199440835d590ee3e37519777acbcb52acd",
+      "modified_utc": "2026-03-12T12:09:02+00:00"
+    },
+    {
+      "path": "data/external_projections/thebat_2026.csv",
+      "sha256": "12ce5bc2c61a748ab3330bdecc3aeaa97e371adbec89f075c02b7c56be258017",
+      "modified_utc": "2026-03-12T12:05:34+00:00"
+    },
+    {
+      "path": "data/external_projections/thebatx_2026.csv",
+      "sha256": "9d27925fc1e88b6e76f4bb9e2b3d91876d559d1ad56f305fb7b07ec132bf3fd8",
+      "modified_utc": "2026-03-12T11:55:20+00:00"
+    },
+    {
+      "path": "data/external_projections/atc_2026.csv",
+      "sha256": "16dbbe99b52b8d731bfd5f3c0c3daeae734f416544b2f59e34dddd8482efe991",
+      "modified_utc": "2026-03-12T12:07:42+00:00"
+    },
+    {
+      "path": "data/external_projections/depthcharts_2026.csv",
+      "sha256": "10161ea22bea85e834fad6d7808eee33183f4bba3db5f1c9503077fa602fbe4e",
+      "modified_utc": "2026-03-12T12:07:24+00:00"
+    },
+    {
+      "path": "data/external_projections/zipsdc_2026.csv",
+      "sha256": "87b5c8eac2dd627f176282f28932f696dd5332d23247576579d8fa8bf608d489",
+      "modified_utc": "2026-03-12T12:08:54+00:00"
+    },
+    {
+      "path": "data/external_projections/oopsy_2026.csv",
+      "sha256": "c4e7188b3eb0447bda1360cd851f8686bc5f74ffc656abac20ec38f852e19642",
+      "modified_utc": "2026-03-12T12:07:32+00:00"
+    }
+  ],
+  "hydra_players": 243,
+  "common_players": 240,
+  "primary_players": 198,
+  "zero_actual_players": [
+    "Wilmer Flores",
+    "Jose Iglesias",
+    "Jurickson Profar",
+    "Michael A. Taylor",
+    "Mike Tauchman",
+    "Gavin Lux",
+    "Nolan Jones",
+    "Jordan Westburg"
+  ],
+  "excluded_from_common": [
+    "Jurickson Profar",
+    "Michael A. Taylor",
+    "Michael Toglia"
+  ],
+  "seed": 42,
+  "bootstrap_samples": 2000,
+  "verification_snapshots": {
+    "player_comparison.csv": "f4d389e17f9cb6e2f1f476e76d53d5b1d811ebdee6aa7f51ccf82ee187662751",
+    "earlier_hydra.csv": "1a1bc78657e8840abaee0ac99821acdebfdb9221b02f5431cea7d4d369ed2459",
+    "actuals_2026_fangraphs.csv": "7dec545e27163796e2dea7900e42ce8eea3e88bc629d87eebc58b25cdc0dc26e",
+    "actuals_2026_mlb.csv": "defa6c8ecaf667825825e387bba25cb5c7046bf65e338263840b3fc340306fa6"
+  },
+  "sources": {
+    "fangraphs": "https://www.fangraphs.com/leaders/major-league?pos=all&stats=bat&lg=all&qual=0&type=8&season=2026&season1=2026&ind=0",
+    "mlb": "https://statsapi.mlb.com/api/v1/stats?stats=season&group=hitting&season=2026&sportIds=1&gameType=R&playerPool=ALL&limit=2000"
+  }
+}

@@ -1,0 +1,21 @@
+year: 2026
+seed: 42
+bootstrap_samples: 2000
+minimum_actual_pa: 200
+sensitivity_minimum_pa: [1, 500]
+hydra: data/projections/projections_mtl_2026.csv
+hydra_earlier: data/projections/projections_vs_external_2026.csv
+merged: data/merged_batter_data.parquet
+previous_actuals: data/raw/batting_2025.parquet
+external_dir: data/external_projections
+systems:
+  steamer: Steamer
+  zips: ZiPS
+  thebat: THE BAT
+  thebatx: THE BAT X
+  atc: ATC
+  depthcharts: Depth Charts
+  zipsdc: ZiPS DC
+  oopsy: OOPSY
+actuals: data/reports/preseason_2026/fangraphs_actuals_raw.json
+crosscheck: data/reports/preseason_2026/mlb_actuals_raw.json
