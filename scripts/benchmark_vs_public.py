@@ -386,6 +386,10 @@ def _score_all_players(
         preds[mtl_display] = mtl[_ALL_PLAYER_STATS]
     for system, lookup in ext_loaded.items():
         display = _SYSTEM_DISPLAY.get(system, system.capitalize())
+        missing = [c for c in _ALL_PLAYER_STATS if c not in lookup.columns]
+        if missing:
+            logger.warning("  All-players view skips %s: no %s", display, missing)
+            continue
         preds[display] = lookup.reindex(idfg)[_ALL_PLAYER_STATS].reset_index(drop=True)
 
     valid = pd.concat([p.notna().all(axis=1) for p in preds.values()], axis=1).all(
