@@ -66,7 +66,7 @@ uv run python -m src.data.fetch_projections --year 2026   # download Steamer/ZiP
 uv run python scripts/generate_projections.py --with-public   # side-by-side with public projections
 
 # Step 6 (optional): Multi-year benchmark vs public projections
-uv run python scripts/benchmark_vs_public.py   # full 2022-2025 benchmark
+uv run python scripts/benchmark_vs_public.py   # full 2022-2025 benchmark (200+ PA and all-players views)
 uv run python scripts/benchmark_vs_public.py --years 2025   # quick smoke test
 uv run python scripts/benchmark_vs_public.py --with-plots   # + comparison plots
 

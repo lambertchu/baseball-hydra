@@ -333,6 +333,17 @@ MTL is **1.9% ahead of Steamer** and **2.0% behind ZiPS** on aggregate mean RMSE
 - Target winsorization (H13): -0.11% — negligible effect
 - Stat-specific aging curves (H14): +0.00% — excluded (no benefit on small dataset)
 
+**Preseason, all-players view** — pooled RMSE across 2022-2025 for every player with 300+ PA the prior season (1,111 player-seasons, 40 with 0 PA). A season with no MLB PA counts as 0, so playing-time misses are scored:
+
+| System  | PA    | HR   | R     | RBI   | SB   |
+| ------- | ----- | ---- | ----- | ----- | ---- |
+| **MTL** | 188.3 | 8.75 | 25.37 | 25.68 | 7.02 |
+| Steamer | 149.5 | 8.23 | 22.53 | 22.93 | 6.25 |
+| ZiPS    | 189.6 | 8.72 | 26.21 | 27.71 | 6.80 |
+| Naive   | 187.5 | 9.21 | 26.02 | 26.41 | 7.77 |
+
+Marcel PA over-projects playing time, so MTL trails Steamer on every stat here. Output: `benchmark_all_players.csv` and the `all_players` key in `benchmark_report.json`.
+
 **ROS (rest-of-season)** — pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint, with Phase 2/3 trained on the backfilled 2016-2022 snapshots (all systems scored on identical rows; 2025 eval pending — Phase 3 was never trained for it):
 
 | PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 | Phase3 |
