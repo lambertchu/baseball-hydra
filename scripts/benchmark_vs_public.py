@@ -54,6 +54,10 @@ _SYSTEM_DISPLAY = {
 # Ordered: our models first, then external, then naive
 _SYSTEM_ORDER_KEYS = ["MTL", "Steamer", "ZiPS", "Naive"]
 
+# All-players view: PA and counting stats for every projected player
+_ALL_PLAYER_STATS = ["pa", "hr", "r", "rbi", "sb"]
+_ALL_PLAYER_DISPLAY = [s.upper() for s in _ALL_PLAYER_STATS]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,6 +201,11 @@ def evaluate_year(
         df_featured, end_year=eval_year - 1, target_cols=TARGET_COLUMNS,
     )
 
+    # All-players view keeps players who lost playing time next season
+    universe_df = predict_df[
+        predict_df["pa"] >= data_config.get("min_pa_predict", 300)
+    ].copy()
+
     # Filter predict set to players with valid targets and sufficient actual PA
     predict_df = predict_df.dropna(subset=TARGET_COLUMNS)
     if "target_pa" in predict_df.columns:
@@ -241,6 +250,7 @@ def evaluate_year(
     # --- Train / load MTL and predict ---
     mtl_display = MODEL_CONFIGS["mtl"]["display_name"]
     mtl_preds: pd.DataFrame | None = None
+    mtl_all_rates: pd.DataFrame | None = None
     try:
         if no_retrain:
             logger.info("  Loading saved MTL …")
@@ -258,6 +268,9 @@ def evaluate_year(
                 stat = col.replace("target_", "")
                 if stat in COUNT_STATS:
                     mtl_preds[col] = mtl_preds[col] * projected_pa.values
+        if rate_targets:
+            X_all, _ = extract_xy(universe_df, data_config)
+            mtl_all_rates = model.predict(align_features(X_all, model, mtl_display))
     except Exception:
         logger.exception("  Failed MTL for %d", eval_year)
 
@@ -328,6 +341,10 @@ def evaluate_year(
             "metrics": compute_metrics(y_true_f, preds_f, TARGET_DISPLAY),
         }
 
+    result["all_players"] = _score_all_players(
+        eval_year, universe_df, data_config, mtl_all_rates, ext_loaded, mtl_display
+    )
+
     # Log per-year summary
     for sys_name in _ordered_systems(set(result["systems"])):
         agg_rmse = result["systems"][sys_name]["metrics"]["aggregate"]["rmse"]
@@ -336,12 +353,74 @@ def evaluate_year(
     return result
 
 
+def _score_all_players(
+    eval_year: int,
+    universe_df: pd.DataFrame,
+    data_config: dict,
+    mtl_rates: pd.DataFrame | None,
+    ext_loaded: dict[str, pd.DataFrame],
+    mtl_display: str,
+) -> dict | None:
+    """Score PA and counting stats for every projected player.
+
+    A player with no MLB PA in ``eval_year`` counts as 0 for every stat, so
+    injuries and demotions are scored instead of dropped.
+    """
+    raw_dir = Path(data_config.get("raw_data_dir", "data/raw"))
+    actual = pd.read_parquet(
+        raw_dir / f"batting_{eval_year}.parquet", columns=["idfg", *_ALL_PLAYER_STATS]
+    )
+    actual["idfg"] = actual["idfg"].astype(int)
+    idfg = universe_df["idfg"].astype(int)
+    y_true = actual.set_index("idfg").reindex(idfg)[_ALL_PLAYER_STATS].fillna(0.0)
+    y_true = y_true.reset_index(drop=True)
+
+    preds = {
+        "Naive": universe_df[_ALL_PLAYER_STATS].astype(float).reset_index(drop=True)
+    }
+    if mtl_rates is not None:
+        pa = project_pa(universe_df, data_config.get("season_games", {})).to_numpy()
+        mtl = pd.DataFrame({"pa": pa})
+        for stat in _ALL_PLAYER_STATS[1:]:
+            mtl[stat] = mtl_rates[f"target_{stat}"].to_numpy() * pa
+        preds[mtl_display] = mtl[_ALL_PLAYER_STATS]
+    for system, lookup in ext_loaded.items():
+        display = _SYSTEM_DISPLAY.get(system, system.capitalize())
+        preds[display] = lookup.reindex(idfg)[_ALL_PLAYER_STATS].reset_index(drop=True)
+
+    valid = pd.concat([p.notna().all(axis=1) for p in preds.values()], axis=1).all(
+        axis=1
+    )
+    if not valid.any():
+        return None
+    y_true_f = y_true[valid].reset_index(drop=True)
+    n_zero = int((y_true_f["pa"] == 0).sum())
+    logger.info("  All-players view: %d players, %d with 0 PA", len(y_true_f), n_zero)
+
+    systems = {}
+    for name, p in preds.items():
+        p_f = p[valid].reset_index(drop=True)
+        systems[name] = {
+            "y_pred": p_f.to_numpy(),
+            "metrics": compute_metrics(y_true_f, p_f, _ALL_PLAYER_DISPLAY),
+        }
+    return {
+        "n_players": len(y_true_f),
+        "n_zero_pa": n_zero,
+        "y_true": y_true_f.to_numpy(),
+        "systems": systems,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
 
 
-def aggregate_results(year_results: list[dict | None]) -> dict[str, dict]:
+def aggregate_results(
+    year_results: list[dict | None],
+    target_names: list[str] | None = None,
+) -> dict[str, dict]:
     """Pool y_true/y_pred across years and compute pooled metrics."""
     valid = [r for r in year_results if r is not None]
     if not valid:
@@ -361,7 +440,9 @@ def aggregate_results(year_results: list[dict | None]) -> dict[str, dict]:
         if y_trues:
             pooled_true = np.concatenate(y_trues, axis=0)
             pooled_pred = np.concatenate(y_preds, axis=0)
-            pooled[sys_name] = compute_metrics(pooled_true, pooled_pred, TARGET_DISPLAY)
+            pooled[sys_name] = compute_metrics(
+                pooled_true, pooled_pred, target_names or TARGET_DISPLAY
+            )
 
     return pooled
 
@@ -438,24 +519,50 @@ def print_benchmark_results(
     print()
 
 
+def print_all_players_results(
+    year_results: list[dict | None],
+    pooled_all: dict[str, dict],
+) -> None:
+    """Print the all-players view (missed time counts as 0)."""
+    views = [r["all_players"] for r in year_results if r and r.get("all_players")]
+    if not views or not pooled_all:
+        return
+    n_players = sum(v["n_players"] for v in views)
+    n_zero = sum(v["n_zero_pa"] for v in views)
+    print(
+        f"\n  All projected players (missed time = 0): "
+        f"{n_players} player-seasons, {n_zero} with 0 PA"
+    )
+    print("  Pooled RMSE (lower is better)")
+    _print_metric_table(
+        pooled_all,
+        _ordered_systems(set(pooled_all)),
+        "rmse",
+        targets=_ALL_PLAYER_DISPLAY,
+    )
+    print()
+
+
 def _print_metric_table(
     pooled: dict[str, dict],
     system_order: list[str],
     metric: str,
     fmt_rate: str = ".4f",
     fmt_count: str = ".2f",
+    targets: list[str] | None = None,
 ) -> None:
     """Print a per-target metric table."""
+    targets = targets or TARGET_DISPLAY
     print(f"  {'System':<12}", end="")
-    for t in TARGET_DISPLAY:
+    for t in targets:
         print(f"  {t:>8}", end="")
     print(f"  {'Mean':>8}")
-    print(f"  {'-' * (12 + 10 * (len(TARGET_DISPLAY) + 1))}")
+    print(f"  {'-' * (12 + 10 * (len(targets) + 1))}")
 
     for sys_name in system_order:
         metrics = pooled[sys_name]
         print(f"  {sys_name:<12}", end="")
-        for t in TARGET_DISPLAY:
+        for t in targets:
             val = metrics["per_target"][t][metric]
             fmt = fmt_rate if t.lower() in RATE_STATS else fmt_count
             print(f"  {val:>8{fmt}}", end="")
@@ -535,6 +642,7 @@ def save_benchmark_outputs(
     year_results: list[dict | None],
     pooled: dict[str, dict],
     output_dir: str | Path,
+    pooled_all: dict[str, dict] | None = None,
 ) -> None:
     """Save benchmark report (JSON) and summary table (CSV)."""
     out = Path(output_dir)
@@ -559,6 +667,23 @@ def save_benchmark_outputs(
             if sys_name in yr["systems"]:
                 yr_entry["systems"][sys_name] = yr["systems"][sys_name]["metrics"]
         report["per_year"].append(yr_entry)
+    if pooled_all:
+        report["all_players"] = {
+            "pooled": pooled_all,
+            "per_year": [
+                {
+                    "year": yr["year"],
+                    "n_players": yr["all_players"]["n_players"],
+                    "n_zero_pa": yr["all_players"]["n_zero_pa"],
+                    "systems": {
+                        name: entry["metrics"]
+                        for name, entry in yr["all_players"]["systems"].items()
+                    },
+                }
+                for yr in valid
+                if yr.get("all_players")
+            ],
+        }
 
     json_path = out / "benchmark_report.json"
     with open(json_path, "w") as f:
@@ -594,6 +719,16 @@ def save_benchmark_outputs(
     csv_path = out / "benchmark_table.csv"
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     logger.info("Saved table → %s", csv_path)
+
+    if pooled_all:
+        all_rows = [
+            {"system": name, "target": t, **pooled_all[name]["per_target"][t]}
+            for name in _ordered_systems(set(pooled_all))
+            for t in _ALL_PLAYER_DISPLAY
+        ]
+        all_path = out / "benchmark_all_players.csv"
+        pd.DataFrame(all_rows).to_csv(all_path, index=False)
+        logger.info("Saved all-players table → %s", all_path)
 
     # --- Rankings CSV ---
     ranking_rows = []
@@ -750,10 +885,15 @@ def main() -> None:
 
     # Aggregate across years
     pooled = aggregate_results(year_results)
+    pooled_all = aggregate_results(
+        [r.get("all_players") for r in year_results if r is not None],
+        _ALL_PLAYER_DISPLAY,
+    )
 
     # Output
     print_benchmark_results(year_results, pooled)
-    save_benchmark_outputs(year_results, pooled, args.output_dir)
+    print_all_players_results(year_results, pooled_all)
+    save_benchmark_outputs(year_results, pooled, args.output_dir, pooled_all)
 
     if args.with_plots:
         generate_benchmark_plots(pooled, args.output_dir)
