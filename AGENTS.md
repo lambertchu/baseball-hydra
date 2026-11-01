@@ -23,7 +23,7 @@ Given a batter's historical profile (stats, Statcast metrics, biometric data, pa
 | 4     | `RBI`  | Per-PA rate   | RBI / PA            |
 | 5     | `SB`   | Per-PA rate   | Stolen bases / PA   |
 
-All targets are predicted as per-PA rates internally. At inference, count stat rates are multiplied by projected PA (Marcel formula: `PA_proj = 0.5 × PA_y1 + 0.1 × PA_y2 + 200`) to produce season counting stats. This rate-first approach aligns with how all major projection systems (ZiPS, Steamer, PECOTA, Marcel) decompose predictions and naturally handles the 2020 shortened season (60 games) since per-PA rates are season-length invariant.
+All targets are predicted as per-PA rates internally. At inference, count stat rates are multiplied by projected PA from a learned PA model (`pa_model` in `configs/data.yaml`, see §5.1) to produce season counting stats. This rate-first approach aligns with how all major projection systems (ZiPS, Steamer, PECOTA, Marcel) decompose predictions and naturally handles the 2020 shortened season (60 games) since per-PA rates are season-length invariant.
 
 ---
 
@@ -60,7 +60,7 @@ All targets are predicted as per-PA rates internally. At inference, count stat r
 - **ID mapping**: FanGraphs uses `IDfg`, Statcast uses `mlbam_id`. Use `pybaseball.playerid_reverse_lookup()` to bridge them.
 - **Season boundaries**: regular season only (`game_type == 'R'`). No spring training, postseason, or All-Star data.
 - **Target alignment**: features from year Y predict targets from year Y+1. The feature row for (player, 2024) has target values from (player, 2025).
-- **2020 shortened season (60 games)**: handled via rate-based targets — count targets (HR, R, RBI, SB) are stored as per-PA rates, making them comparable across seasons regardless of length. Raw counting stat features (`hr`, `sb`, `cs`) and their temporal derivatives are excluded from the model (via `exclude_features` in `data.yaml`); their per-PA rate equivalents are used instead. PA projection uses `season_games: {2020: 60}` to scale 2020 PA to 162-game pace for the Marcel formula.
+- **2020 shortened season (60 games)**: handled via rate-based targets — count targets (HR, R, RBI, SB) are stored as per-PA rates, making them comparable across seasons regardless of length. Raw counting stat features (`hr`, `sb`, `cs`) and their temporal derivatives are excluded from the model (via `exclude_features` in `data.yaml`); their per-PA rate equivalents are used instead. The PA model uses `season_games: {2020: 60}` to scale 2020 PA to 162-game pace and never uses 2020 as a PA label.
 - **Backfilled weekly logs (2016-2022) undercount SB/CS**: `batting_week_{2016..2022}.parquet` are derived from Statcast pitch events (BRef fallback in `fetch_game_logs.py`), which cannot see mid-PA steals — SB/CS carry only ~6% of true volume (`sb_per_pa_ytd` ≈ 0.001 vs 0.018 in native BRef years). This poisons SB features **and** `ros_sb`/`ros_sb_per_pa` targets in those seasons. R/RBI reconstruction is accurate to ~4%. `--calibrate-season-totals` can rescale to season totals but is off by default (end-of-season leakage into mid-season rows); the real fix is a BRef weekly re-fetch for 2016-2022.
 
 ### 3.3 Output Schema
@@ -210,11 +210,12 @@ The project has one production track and two parked in-season experiments: the p
 
 - Shared-backbone architecture ([256, 128, 64] → per-target heads).
 - Three-group head architecture: rate heads (OBP, SLG) run first; detached predictions feed count-rate heads (HR/PA, R/PA, RBI/PA); speed heads (SB/PA) receive backbone only.
-- All 6 targets are predicted as per-PA rates internally. Count stats are converted to season totals at inference via Marcel PA projection.
+- All 6 targets are predicted as per-PA rates internally. Count stats are converted to season totals at inference via the learned PA model.
+- **PA model**: gradient boosting fit at call time on `data/raw/batting_YYYY.parquet`. Features: PA for the last 3 seasons, games, WAR, wRC+, age, age². A season with no MLB PA is a 0-PA label, so injury and demotion risk is priced in. Callers pass the last usable label year, so benchmark years cannot leak. Pooled 2022-2026 walk-forward PA RMSE is 159 (Marcel: 190, Steamer: 150). Set `pa_model.method: marcel` to restore `PA_proj = 0.5 × PA_y1 + 0.1 × PA_y2 + 200`.
 - Multi-seed ensemble (5 seeds), Huber loss with homoscedastic uncertainty weighting, cosine annealing warm restarts, mixup augmentation, sample-level recency weighting.
 - **Sample recency weighting**: exponential decay `weight(season) = exp(-λ(max_season - season))` with λ=0.30 (half-life ~2.3 years), normalized to mean=1.0. Weights recent seasons' patterns more heavily when fitting model parameters, complementing per-player temporal features. All major projection systems (Marcel, ZiPS, Steamer) use analogous recency weighting.
 - Config: `configs/mtl.yaml`
-- Benchmarks at **8.882 mean RMSE** (pooled 2022-2025), **2.9% ahead of ZiPS** (9.151).
+- Benchmarks at **9.331 mean RMSE** on the 200+ PA view (pooled 2022-2025): 1.9% ahead of Steamer (9.512), 2.0% behind ZiPS (9.151). That view drops players who lost playing time, so it favors over-projected PA (Marcel PA scored 8.896).
 
 **Why rate-based targets**: Aligns with how every major projection system works (ZiPS, Steamer, PECOTA, Marcel). Per-PA rates are more predictable year-to-year (HR rate r=0.79 vs raw counts which depend on playing time), cleanly separate skill from availability, and naturally handle the 2020 shortened season (60 games) since rates are season-length invariant.
 
@@ -290,7 +291,7 @@ Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, M
 | **Feature Engineering**    | `src/features/*.py`                                         | Registered features across 10 groups (some excluded via config): batting, statcast, non-contact (stabilisation-regressed), speed, bat speed, age, park factors, team stats, temporal, in_season (Phase 2, opt-in) |
 | **Non-Contact**            | `src/features/non_contact.py`                               | Stabilisation-regressed rates (K%, BB%, HBP%, BABIP, ISO, HR/BBE)                                                                                                          |
 | **MTL Network**            | `src/models/mtl/`                                           | Multi-task neural network: three-group rate/count/speed heads, 5-seed ensemble, Huber loss, sample recency weighting, optional target winsorization, holdout/backtest workflows |
-| **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`, `pa_projection.py` | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots, Marcel PA projection (rate → count)                                                          |
+| **Evaluation**             | `src/eval/metrics.py`, `report.py`, `plots.py`, `pa_projection.py` | RMSE/MAE/R²/MAPE, naive baseline comparison, calibration/residual plots, learned PA projection (rate → count)                                                         |
 | **Projection & Benchmark** | `scripts/generate_projections.py`, `benchmark_vs_public.py` | 2026 projections with ensemble, multi-year rolling benchmark vs public projections                                                                                          |
 | **Public Projections**     | `src/data/fetch_projections.py`                             | Fetch Steamer/ZiPS/The Bat/The Bat X from FanGraphs API, merge with our projections for side-by-side comparison                                                             |
 | **Weekly Snapshot Layer**  | `src/data/fetch_game_logs.py`, `build_snapshots.py`, `fetch_statcast.py` (`_aggregate_batter_statcast_weekly`), `rate_helpers.py` | Per-(player, ISO-week) BRef batting logs + Statcast BBE aggregates → weekly snapshots with `*_week`, `*_ytd`, `trail4w_*`, and `ros_*` columns. Raw Statcast retains `game_date`. Shared `obp_slg` / `safe_div` primitives in `rate_helpers.py` keep the ytd and trail4w rate formulas from drifting. A Statcast-derived fallback (`--source statcast`) backfilled 2016-2022 weekly batting when BRef range fetches were unavailable — accurate for PA/AB/H/HR/BB/SO and ~4% low on R/RBI, but undercounts SB/CS ~94% (§3.2). |
@@ -312,16 +313,16 @@ Preseason pipeline is shipped end-to-end: data ingestion, feature engineering, M
 
 ### 7.3 Benchmark Results
 
-**Preseason (full-season)** — pooled RMSE across 2022-2025 (4 years, 1,063 player-seasons, rolling retrain):
+**Preseason (full-season), 200+ PA view** — pooled RMSE across 2022-2025 (4 years, 1,063 player-seasons with 200+ PA in the target season, rolling retrain):
 
 | System  | OBP    | SLG    | HR   | R     | RBI   | SB   | Mean   |
 | ------- | ------ | ------ | ---- | ----- | ----- | ---- | ------ |
-| **MTL** | 0.0306 | 0.0621 | 7.49 | 19.01 | 19.83 | 6.87 | 8.882  |
+| **MTL** | 0.0311 | 0.0631 | 7.68 | 19.87 | 21.29 | 7.06 | 9.331  |
 | Steamer | 0.0294 | 0.0602 | 7.96 | 20.94 | 21.55 | 6.53 | 9.512  |
 | ZiPS    | 0.0289 | 0.0594 | 7.45 | 19.71 | 21.24 | 6.41 | 9.151  |
 | Naive   | 0.0352 | 0.0726 | 8.65 | 22.37 | 23.23 | 7.35 | 10.284 |
 
-MTL is **2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RMSE. MTL wins on HR (7.49), R (19.01), and RBI (19.83). Remaining gap to ZiPS is concentrated in OBP (+5.9%), SLG (+4.5%), and SB (+7.2%).
+MTL is **1.9% ahead of Steamer** and **2.0% behind ZiPS** on aggregate mean RMSE. This view drops players who lost playing time, so it rewards over-projected PA: MTL scored 8.896 here with Marcel PA. The learned PA model cuts pooled 2022-2026 walk-forward PA RMSE from 190 (Marcel) to 159 (Steamer: 150).
 
 **Preseason ablation results** (which MTL features help):
 
@@ -487,7 +488,7 @@ baseball-hydra/
 │       ├── __init__.py
 │       ├── metrics.py                 # RMSE, MAE, R², MAPE
 │       ├── ros_metrics.py             # ROS pinball/PIT metrics, PA-checkpoint selection
-│       ├── pa_projection.py           # Marcel PA projection + rate_to_count helper
+│       ├── pa_projection.py           # Learned PA model (Marcel fallback) + rate_to_count
 │       ├── report.py                  # Generate evaluation reports (JSON + console)
 │       ├── preseason.py               # Saved preseason forecasts vs actuals: metrics, plots, report
 │       ├── preseason_verify.py        # Independent offline recheck of preseason outputs

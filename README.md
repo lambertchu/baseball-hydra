@@ -15,16 +15,16 @@ Traditional projection systems model each stat independently. MTL trains a singl
 
 ### How the preseason MTL stacks up
 
-Benchmarked over 1,063 player-seasons (2022-2025, rolling retrain):
+Benchmarked over 1,063 player-seasons with 200+ PA (2022-2025, rolling retrain):
 
 | System      | OBP    | SLG    | HR   | R     | RBI   | SB   | Mean RMSE |
 | ----------- | ------ | ------ | ---- | ----- | ----- | ---- | --------- |
-| **MTL**     | 0.0306 | 0.0621 | 7.49 | 19.01 | 19.83 | 6.87 | **8.882** |
+| **MTL**     | 0.0311 | 0.0631 | 7.68 | 19.87 | 21.29 | 7.06 | 9.331     |
 | ZiPS        | 0.0289 | 0.0594 | 7.45 | 19.71 | 21.24 | 6.41 | 9.151     |
 | Steamer     | 0.0294 | 0.0602 | 7.96 | 20.94 | 21.55 | 6.53 | 9.512     |
 | Last season | 0.0352 | 0.0726 | 8.65 | 22.37 | 23.23 | 7.35 | 10.284    |
 
-**2.9% ahead of ZiPS** and **6.6% ahead of Steamer** on aggregate mean RMSE, with the largest gains on counting stats (R and RBI).
+1.9% ahead of Steamer and 2.0% behind ZiPS on aggregate mean RMSE. This view drops players who lost playing time, which rewards over-projected PA. The learned PA model cuts pooled 2022-2026 PA RMSE from 190 (Marcel) to 159 (Steamer: 150).
 
 ### How the ROS pipeline stacks up
 
@@ -179,7 +179,7 @@ Implemented in `src/eval/`:
 - Calibration scatter plots (predicted vs actual)
 - Residual distribution histograms
 - MTL training curves (loss + validation RMSE)
-- Marcel PA projection + rate_to_count helper (`src/eval/pa_projection.py`)
+- Learned PA projection (Marcel fallback) + rate_to_count helper (`src/eval/pa_projection.py`)
 - **ROS metrics** (`src/eval/ros_metrics.py`): pinball quantile loss, PIT coverage for calibration, per-player PA-checkpoint row selection — used by the ROS benchmark script
 - **Shrinkage baseline** (`src/models/baselines/shrinkage.py`): closed-form Beta-Binomial posterior per stat (OBP, SLG, HR/PA, R/PA, RBI/PA, SB/PA) with per-stat pseudocount τ₀ (stabilisation-based defaults or fit via leave-one-year-out cross-fitting); emits both posterior means and Beta-CDF quantiles for pinball/PIT
 - **Phase 2 MTL ROS** (`src/models/mtl_ros/`): quantile-regressing MTL with a 7th PA-remaining head, pinball + Kendall uncertainty weighting, multi-seed ensemble with monotonic quantile sort (parked)
