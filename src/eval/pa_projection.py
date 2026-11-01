@@ -158,6 +158,15 @@ def fit_pa_model(
     The label is actual PA in Y+1, or 0 when the player has no row that year.
     Shortened label seasons are skipped.
     """
+    # A missing season file would turn every player into a 0-PA label.
+    seasons = set(history["season"])
+    missing = sorted(set(range(min(seasons), max_label_year + 1)) - seasons)
+    if missing:
+        raise ValueError(
+            f"Batting history is missing seasons {missing}. "
+            "Fetch them into raw_data_dir before projecting PA."
+        )
+
     season_games = season_games or {}
     short = [y for y, g in season_games.items() if g < _FULL_SEASON_GAMES]
     label_year = history["season"] + 1
