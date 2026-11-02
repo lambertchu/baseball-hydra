@@ -333,6 +333,23 @@ MTL is **1.9% ahead of Steamer** and **2.0% behind ZiPS** on aggregate mean RMSE
 - Target winsorization (H13): -0.11% — negligible effect
 - Stat-specific aging curves (H14): +0.00% — excluded (no benefit on small dataset)
 
+**Preseason, all-players views** — every player with 300+ PA the prior season. A season with no MLB PA counts as 0, so playing-time misses are scored. Two views:
+
+- **Full:** every such player. Scores MTL (learned PA), MTL-Marcel (same rates × Marcel PA) and Naive, which cover everyone.
+- **Public overlap:** the players every public system also projects, so all systems share rows.
+
+Public-overlap view, pooled RMSE across 2022-2025 (1,111 player-seasons, 40 with 0 PA):
+
+| System     | PA    | HR   | R     | RBI   | SB   |
+| ---------- | ----- | ---- | ----- | ----- | ---- |
+| **MTL**    | 158.9 | 8.04 | 21.97 | 22.72 | 6.85 |
+| MTL-Marcel | 188.3 | 8.75 | 25.37 | 25.68 | 7.02 |
+| Steamer    | 149.5 | 8.23 | 22.53 | 22.93 | 6.25 |
+| ZiPS       | 189.6 | 8.72 | 26.21 | 27.71 | 6.80 |
+| Naive      | 187.5 | 9.21 | 26.02 | 26.41 | 7.77 |
+
+The learned PA model beats Marcel on every stat. MTL now beats Steamer on HR, R and RBI, and trails it on PA and SB. Add `--years 2022 2023 2024 2025 2026` to score 2026 (needs `batting_2026.parquet`). Output: `benchmark_all_players.csv` (`view` column) and the `all_players` key in `benchmark_report.json`.
+
 **ROS (rest-of-season)** — pooled mean RMSE across 2023-2024 weekly snapshots at each PA checkpoint, with Phase 2/3 trained on the backfilled 2016-2022 snapshots (all systems scored on identical rows; 2025 eval pending — Phase 3 was never trained for it):
 
 | PA checkpoint | PersistObs | FrozenPre | MarcelBlend | **Shrinkage (prod)** | Phase2 | Phase3 |
