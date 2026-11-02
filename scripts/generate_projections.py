@@ -28,7 +28,7 @@ from src.data.fetch_projections import (
 )
 from src.data.splits import get_production_data
 from src.eval.metrics import compute_metrics, compute_naive_baseline
-from src.eval.pa_projection import project_pa, rate_to_count
+from src.eval.pa_projection import project_next_season_pa, rate_to_count
 from src.eval.report import print_report
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import COUNT_STATS, RATE_STATS, TARGET_COLUMNS, TARGET_DISPLAY, TARGET_STATS
@@ -360,10 +360,12 @@ def main() -> None:
     rate_targets = data_config.get("rate_targets", False)
     projected_pa: pd.Series | None = None
     if rate_targets:
-        season_games = data_config.get("season_games", {})
-        projected_pa = project_pa(predict_data, season_games)
+        projected_pa = project_next_season_pa(
+            predict_data, data_config, max_label_year=end_year
+        )
         logger.info(
-            "PA projection (Marcel): mean=%.0f, median=%.0f, range=[%.0f, %.0f]",
+            "PA projection (%s): mean=%.0f, median=%.0f, range=[%.0f, %.0f]",
+            data_config.get("pa_model", {}).get("method", "marcel"),
             projected_pa.mean(), projected_pa.median(),
             projected_pa.min(), projected_pa.max(),
         )

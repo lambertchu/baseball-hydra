@@ -32,7 +32,7 @@ targets:
 
 # Rate-based targets: convert count targets (HR, R, RBI, SB) to per-PA rates.
 # OBP and SLG are already rates and are left unchanged.
-# At inference, predicted rates are multiplied by projected PA (Marcel formula)
+# At inference, predicted rates are multiplied by projected PA (see pa_model)
 # to produce counting stat projections.
 # This aligns with how all major projection systems (ZiPS, Steamer, PECOTA, Marcel)
 # decompose predictions into rate × playing time, and naturally handles the 2020
@@ -44,6 +44,20 @@ rate_targets: true
 # via the Marcel formula, so that a 250-PA 2020 season is treated as ~675 pace.
 season_games:
   2020: 60
+
+# Next-season PA projection for rate -> count conversion.
+# learned: regression fit on data/raw batting history; a season with no MLB
+#   PA is a 0-PA label, so injury and demotion risk is priced in.
+# marcel: 0.5 * PA_y1 + 0.1 * PA_y2 + 200 (legacy).
+pa_model:
+  method: learned
+  estimator: gbm         # ols | gbm; gbm won the 2022-2026 walk-forward backtest
+  min_pa_train: 200      # 162-game-pace PA in season Y for a training row
+  gbm:
+    max_iter: 200
+    learning_rate: 0.05
+    max_depth: 3
+    min_samples_leaf: 40
 
 # Feature groups to include (toggle on/off)
 feature_groups:

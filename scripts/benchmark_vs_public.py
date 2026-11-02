@@ -28,7 +28,7 @@ import yaml
 
 from src.data.splits import get_production_data
 from src.eval.metrics import compute_metrics
-from src.eval.pa_projection import project_pa
+from src.eval.pa_projection import project_next_season_pa
 from src.eval.plots import save_figure
 from src.features.pipeline import build_features, extract_xy
 from src.features.registry import COUNT_STATS, RATE_STATS, TARGET_COLUMNS, TARGET_DISPLAY, TARGET_STATS
@@ -217,7 +217,7 @@ def evaluate_year(
     # --- Rate-to-count conversion for evaluation ---
     # When rate_targets is enabled, y_true and model predictions are per-PA rates.
     # Convert to counts for apples-to-apples comparison with external projections.
-    # Use Marcel-projected PA (not actual PA) for model predictions so that the
+    # Use projected PA (not actual PA) for model predictions so that the
     # benchmark is fair — external projections must also predict playing time.
     # y_true uses actual PA since those are ground-truth outcomes.
     rate_targets = data_config.get("rate_targets", False)
@@ -229,9 +229,10 @@ def evaluate_year(
             stat = col.replace("target_", "")
             if stat in COUNT_STATS:
                 y_true[col] = y_true[col] * actual_pa.values
-        # Project PA using Marcel formula for model predictions (fair comparison)
-        season_games = data_config.get("season_games", {})
-        projected_pa = project_pa(predict_df, season_games)
+        # PA model may only learn from labels before eval_year (no leakage)
+        projected_pa = project_next_season_pa(
+            predict_df, data_config, max_label_year=eval_year - 1
+        )
 
     # --- Naive baseline: predict year Y = year Y-1 stats ---
     naive_raw = predict_df[TARGET_STATS].copy()
