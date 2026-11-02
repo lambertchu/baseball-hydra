@@ -1,0 +1,5 @@
+# Keep this evaluation's compact evidence and charts, while leaving raw API
+# responses and the project's other downloaded datasets untracked.
+!*.csv
+!*.png
+!manifest.json
