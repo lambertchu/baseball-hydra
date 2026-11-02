@@ -391,6 +391,11 @@ uv run python scripts/generate_projections.py --fetch-public           # Fetch +
 uv run python scripts/generate_ros_projections.py --year 2026          # Phase 2 ROS projections → data/projections/ros_mtl_2026.csv
 uv run python scripts/generate_ros_projections.py --year 2026 --model phase3  # parked Phase 3 GRU instead (opt-in)
 
+# Score saved preseason forecasts vs actual season results (any season)
+uv run python -m src.data.fetch_actuals --year 2026                       # FanGraphs + MLB season totals (raw JSON)
+uv run python scripts/evaluate_preseason.py --config configs/preseason_eval_2026.yaml           # full run + verify
+uv run python scripts/evaluate_preseason.py --config configs/preseason_eval_2026.yaml --verify  # offline check of committed outputs
+
 # Benchmark vs public projections (multi-year rolling evaluation)
 uv run python scripts/benchmark_vs_public.py                                 # Full 2022-2025 benchmark
 uv run python scripts/benchmark_vs_public.py --years 2024 2025               # Specific years
@@ -415,7 +420,8 @@ baseball-hydra/
 │   ├── data.yaml                      # Data pipeline config
 │   ├── mtl.yaml                       # Preseason MTL config
 │   ├── mtl_ros.yaml                   # Phase 2 ROS quantile MTL config
-│   └── ros.yaml                       # Phase 3 ROS GRU config (parked)
+│   ├── ros.yaml                       # Phase 3 ROS GRU config (parked)
+│   └── preseason_eval_2026.yaml       # Saved-forecast vs actuals evaluation (copy per season)
 ├── data/
 │   ├── .gitignore                     # Ignores *.parquet, *.csv, *.pkl, *.pt, *.json, *.png, *.npz
 │   ├── raw/                           # Per-year cached parquet files (+ weekly snapshots)
@@ -436,6 +442,7 @@ baseball-hydra/
 │   │   ├── fetch_speed.py             # Sprint speed + bat speed download
 │   │   ├── fetch_context.py           # Park factors + team stats download
 │   │   ├── fetch_projections.py       # FanGraphs public projections (Steamer/ZiPS/Bat/BatX)
+│   │   ├── fetch_actuals.py           # FanGraphs + MLB season totals for preseason evaluation
 │   │   ├── fetch_all.py               # Unified CLI: download all sources
 │   │   ├── merge.py                   # Merge all sources -> modeling dataset
 │   │   ├── build_snapshots.py         # Weekly BRef + Statcast → weekly_snapshots_{year}.parquet
@@ -482,11 +489,14 @@ baseball-hydra/
 │       ├── ros_metrics.py             # ROS pinball/PIT metrics, PA-checkpoint selection
 │       ├── pa_projection.py           # Marcel PA projection + rate_to_count helper
 │       ├── report.py                  # Generate evaluation reports (JSON + console)
+│       ├── preseason.py               # Saved preseason forecasts vs actuals: metrics, plots, report
+│       ├── preseason_verify.py        # Independent offline recheck of preseason outputs
 │       └── plots.py                   # Calibration, residual, PIT histograms, comparison plots
 ├── scripts/
 │   ├── generate_projections.py        # Generate next-season preseason projections
 │   ├── generate_ros_projections.py    # Generate current-season ROS projections (Phase 2 default, --model phase3 opt-in)
 │   ├── benchmark_vs_public.py         # Multi-year rolling benchmark vs public projections
+│   ├── evaluate_preseason.py          # CLI: score saved preseason forecasts vs actuals
 │   ├── benchmark_ros.py               # Rolling ROS benchmark at PA checkpoints (phase2 default, phase3 opt-in)
 │   └── run_ablation.py                # Ablation study for preseason MTL config variants
 └── tests/
@@ -498,6 +508,7 @@ baseball-hydra/
     ├── test_mtl.py                    # Preseason MTL core tests
     ├── test_backtest.py               # Backtest fold and report behavior
     ├── test_projections.py            # Public projections fetch, load, merge
+    ├── test_preseason_eval.py         # Preseason evaluation end-to-end + offline verify
     ├── test_plots_and_predictions.py  # Plots and prediction helpers
     ├── test_weekly_snapshots.py       # Weekly snapshot pipeline (ISO weeks, ytd/ros invariants)
     ├── test_ros_metrics.py            # ROS metrics (pinball, PIT, PA checkpoints)

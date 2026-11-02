@@ -372,6 +372,8 @@ def main() -> None:
     # Build results table with player info (include idfg for projection join)
     results = pd.DataFrame({
         "_idfg": predict_data["idfg"].values,
+        "idfg": predict_data["idfg"].values.astype(int),
+        "mlbam_id": predict_data["mlbam_id"].values.astype(int),
         "Player": predict_data["name"].values,
         "Team": predict_data["team"].values,
         f"Age ({predict_year})": (predict_data["age"].values + 1).astype(int),
@@ -386,7 +388,7 @@ def main() -> None:
 
     # Add projected PA column if rate targets are used
     if projected_pa is not None:
-        results[f"{predict_year} PA (proj)"] = projected_pa.values.astype(int)
+        results[f"{predict_year} PA (proj)"] = projected_pa.values.round(1)
 
     # Add MTL prediction columns
     pred_cols = _build_single_model_results(predictions, mtl_display)
@@ -456,7 +458,11 @@ def main() -> None:
     _PROJECTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
     # MTL projections CSV
-    model_cols = ["Player", "Team", f"Age ({predict_year})", f"{end_year} PA"]
+    # IDs and projected PA let the preseason evaluator score this file directly.
+    model_cols = ["idfg", "mlbam_id", "Player", "Team", f"Age ({predict_year})"]
+    model_cols.append(f"{end_year} PA")
+    if projected_pa is not None:
+        model_cols.append(f"{predict_year} PA (proj)")
     for stat in TARGET_STATS:
         model_cols.append(f"{end_year} {stat.upper()}")
     for stat in TARGET_STATS:

@@ -168,7 +168,8 @@ data/
 The [2026 saved-forecast evaluation](data/reports/preseason_2026/README.md)
 compares Hydra and eight public systems with actual 2026 regular-season results.
 It includes common-player metrics, playing-time and per-PA diagnostics, bootstrap
-intervals, and an offline verification command.
+intervals, and an offline verification command. The same pipeline
+(`scripts/evaluate_preseason.py`) runs for any season from a config in `configs/`.
 
 Implemented in `src/eval/`:
 

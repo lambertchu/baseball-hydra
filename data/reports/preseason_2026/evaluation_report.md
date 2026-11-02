@@ -1,30 +1,30 @@
 # Saved 2026 preseason forecasts vs 2026 regular-season actuals
 
-Evaluated October 29, 2026. Hydra: 243 players; shared by all systems: 240; primary cohort (200+ actual PA): 198.
+Evaluated 2026-10-29. Hydra: 243 players; shared by all systems: 240; primary cohort (200+ actual PA): 198.
 
 ## Findings
 
-Hydra ranks first on the existing 200+ PA benchmark: mean RMSE 9.418 versus Steamer 9.478 and ZiPS 10.124. Its equal-stat score is 0.8336 versus Steamer 0.8365; this small difference is not established by the paired bootstrap (Steamer minus Hydra 95% interval: -0.0280 to +0.0316). Hydra has the lowest HR, R and RBI RMSE; THE BAT X leads OBP, ATC leads SLG, and Steamer leads SB. All nine systems beat naive persistence on the aggregate score.
+On the primary benchmark (198 shared batters with 200+ actual PA), Hydra ranks 1st of 10 by mean RMSE (top three: Hydra 9.418, Steamer 9.478, and ATC 9.653) and 1st by equal-stat score (0.8336). The best other system by equal-stat score is Steamer (0.8365); the paired bootstrap does not establish a difference (Steamer minus Hydra 95% interval: -0.0280 to +0.0316). Lowest RMSE by target: THE BAT X leads OBP; ATC leads SLG; Hydra leads HR, R, and RBI; Steamer leads SB. 9 of 9 systems beat naive persistence on the equal-stat score.
 
-This is not an unconditional Hydra win. Including all 240 shared projected players in the counting-stat evaluation puts Steamer first, followed by ATC, THE BAT X, THE BAT, and Hydra fifth. Hydra's mean count RMSE is 16.486 versus Steamer 14.549 (13.3% higher). On all shared players, PA RMSE is 192.2 for Hydra versus 151.0 for Steamer; Hydra overpredicts PA by 77.1 per player on average. The per-PA diagnostic puts Hydra and ATC nearly level at the top. This points to availability/playing-time projection as a larger improvement opportunity than the underlying rate model; it does not by itself establish a causal error decomposition.
+Including all 240 shared projected players in the counting-stat evaluation puts Steamer first and Hydra 5th (mean count RMSE 16.486 versus 14.549, +13.3%). On all shared players, PA RMSE is 192.2 for Hydra versus 151.0 for Steamer; Hydra's mean PA bias is +77.1 per player. On the per-PA skill diagnostic Hydra ranks 1st by equal-stat score. A gap between the season-total and per-PA ranks points at playing-time projection, but does not by itself establish a causal error decomposition.
 
-The conclusion is sensitive to the evaluation population: Steamer wins among all 234 shared batters with at least one PA, while ATC leads among the 100 with 500+ PA. The earlier March 29 Hydra export scores 9.437 mean RMSE and 0.8352 equal-stat score, leaving its narrow 200+ PA lead over Steamer intact. These are evaluations of saved forecasts with a timing caveat, not an independently proven Opening-Day freeze.
+Sensitivity to the evaluation population (equal-stat score): Steamer leads the 234 shared batters with 1+ PA; ATC leads the 100 shared batters with 500+ PA. The alternate Hydra export scores 9.437 mean RMSE and 0.8352 equal-stat score, ranking 1st on the primary cohort.
 
 ## Scope and provenance
 
-The primary Hydra forecast is the saved projections_mtl_2026.csv export, dated April 12. Public CSVs are dated March 12. A different March 29 Hydra export is evaluated separately. File modification dates are evidence of local snapshots, not proof of immutable pre-Opening-Day forecasts. The available merged model inputs stop at 2025, but model-development timing cannot be independently established from these artifacts. No model was retrained and no forecasts were refreshed.
+Input files and their local modification dates: projections_mtl_2026.csv (2026-04-12), projections_vs_external_2026.csv (2026-03-29), merged_batter_data.parquet (2026-03-29), batting_2025.parquet (2026-03-29), fangraphs_actuals_raw.json (2026-10-30), mlb_actuals_raw.json (2026-10-30), steamer_2026.csv (2026-03-12), zips_2026.csv (2026-03-12), thebat_2026.csv (2026-03-12), thebatx_2026.csv (2026-03-12), atc_2026.csv (2026-03-12), depthcharts_2026.csv (2026-03-12), zipsdc_2026.csv (2026-03-12), and oopsy_2026.csv (2026-03-12). Modification dates are evidence of local snapshots, not proof of immutable pre-Opening-Day forecasts. No model was retrained and no forecasts were refreshed.
 
-Hydra values retain their saved precision (3 decimals for OBP/SLG; integer counts); public exports retain original precision. IDs were recovered through exact name plus 2025 PA matches, then all comparisons use FanGraphs player IDs. Hydra projected PA is reconstructed using the existing temporal-feature and Marcel functions on the saved 2016–2025 merged frame. Its saved priors parquet contains different forecasts and is not substituted for the requested CSV.
+The Hydra export has no player IDs, so IDs were recovered through exact name plus 2025 PA matches. Projected PA was reconstructed with the Marcel formula on the saved merged frame. All comparisons use FanGraphs player IDs.
 
-Actuals are FanGraphs season=2026, season1=2026, qual=0, month=0 regular-season totals, all teams combined. All 1,472 returned records were retained. Independent MLB gameType=R season totals contain 751 players; all 751 match FanGraphs on all four target counts exactly and on OBP/SLG within 0.0005 rounding. PA differs by one for Ryan Jeffers and Sean Keys; this report consistently uses FanGraphs PA. FanGraphs' browser page returned HTTP 403; its data API succeeded.
+Actuals are FanGraphs 2026 regular-season totals, all teams combined (1,472 records retained). Independent MLB season totals contain 751 players; all 751 match FanGraphs on the four target counts exactly and on OBP/SLG within 0.0005 rounding. PA differs for Ryan Jeffers and Sean Keys; this report uses FanGraphs PA.
 
-No batting record in either complete source: Wilmer Flores, Jose Iglesias, Jurickson Profar, Michael A. Taylor, Mike Tauchman, Gavin Lux, Nolan Jones, Jordan Westburg. Their season counts and PA are zero; undefined rates are never scored as zero.
+No batting record in the actuals: Wilmer Flores, Jose Iglesias, Jurickson Profar, Michael A. Taylor, Mike Tauchman, Gavin Lux, Nolan Jones, Jordan Westburg. Their season counts and PA are zero; undefined rates are never scored as zero.
 
 Excluded from the all-model intersection because a public system lacks a valid forecast: Jurickson Profar, Michael A. Taylor, Michael Toglia. Pairwise coverage checks are provided separately.
 
 ## Primary RMSE comparison
 
-Every model is scored on identical players with at least 200 actual PA, consistent with the existing benchmark threshold. Lower RMSE is better. Equal-stat score is the mean of six target RMSEs divided by the corresponding naive-persistence RMSE; 1.00 means repeat 2025. This gives all targets equal influence. The repository's mixed-unit Mean RMSE is also retained, but is dominated by runs/RBI and should not be the sole overall ranking.
+Every model is scored on identical players with at least 200 actual PA. Lower RMSE is better. Equal-stat score is the mean of six target RMSEs divided by the corresponding naive-persistence RMSE; 1.00 means repeat 2025. This gives all targets equal influence. The repository's mixed-unit Mean RMSE is also retained, but is dominated by runs/RBI and should not be the sole overall ranking.
 
 | model | OBP | SLG | HR | R | RBI | SB | Equal-stat score | Mean RMSE |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -202,13 +202,19 @@ The full-roster count evaluation includes low-PA and zero-PA players, avoiding t
 | ZiPS DC | 568 | 240 | 198 | Jurickson Profar; Michael A. Taylor; Michael Toglia |
 | OOPSY | 771 | 242 | 198 | Jurickson Profar |
 
+## Analyst notes
+
+The primary Hydra forecast is the April 12 projections_mtl_2026.csv export; the public CSVs are dated March 12, and the March 29 export is scored only as a timing check. The merged model inputs stop at 2025, but model-development timing cannot be independently established from these artifacts. The saved priors parquet contains different forecasts and is not substituted for the requested CSV.
+
+Hydra values retain their saved precision (3 decimals for OBP/SLG; integer counts); public exports retain original precision. FanGraphs' browser page returned HTTP 403 during collection; its data API succeeded.
+
 ## Files and metric definitions
 
-metrics_by_target.csv contains RMSE, MAE, R², MAPE, signed bias, valid MAPE denominator counts, and normalized error for every target/cohort/model. MAPE excludes zero actuals, so count-stat MAPE, especially steals, is supplementary. summary_metrics.csv contains means. player_comparison.csv contains every input forecast and matched actual; playing_time_metrics.csv isolates PA errors. Accuracy, calibration and residual plots are included. Training curves are not regenerated because this is a frozen-forecast evaluation. manifest.json records every input hash, code version, config and seed. Reproduce from repository root with `.venv/bin/python data/reports/preseason_2026/evaluate.py`.
+metrics_by_target.csv contains RMSE, MAE, R², MAPE, signed bias, valid MAPE denominator counts, and normalized error for every target/cohort/model. MAPE excludes zero actuals, so count-stat MAPE, especially steals, is supplementary. summary_metrics.csv contains means. player_comparison.csv contains every input forecast and matched actual; playing_time_metrics.csv isolates PA errors. manifest.json records every input hash, code version, config and seed.
 
 ## Reproduction and charts
 
-See [verification instructions and source requirements](README.md). The offline verifier reproduces the numerical results from committed snapshots; rebuilding with evaluate.py requires the original local caches.
+See [verification instructions and source requirements](README.md).
 
 ![Accuracy against naive persistence](accuracy_heatmap.png)
 

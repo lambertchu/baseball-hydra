@@ -1,0 +1,53 @@
+# Preseason evaluation: saved forecasts vs actual season results.
+# Copy this file for a new season and update year, paths and notes.
+# Run: uv run python scripts/evaluate_preseason.py --config configs/preseason_eval_2026.yaml
+
+year: 2026
+output_dir: data/reports/preseason_2026
+seed: 42
+bootstrap_samples: 2000
+minimum_actual_pa: 200
+sensitivity_minimum_pa: [1, 500]
+
+hydra: data/projections/projections_mtl_2026.csv
+hydra_prefix: MTL
+# Optional second Hydra export, scored as a timing-sensitivity check.
+hydra_alternate: data/projections/projections_vs_external_2026.csv
+# Only for exports without idfg / projected PA columns (made before PR #9).
+legacy_id_match:
+  previous_actuals: data/raw/batting_2025.parquet
+  previous_min_pa: 300
+  merged: data/merged_batter_data.parquet
+
+external_dir: data/external_projections
+systems:
+  steamer: Steamer
+  zips: ZiPS
+  thebat: THE BAT
+  thebatx: THE BAT X
+  atc: ATC
+  depthcharts: Depth Charts
+  zipsdc: ZiPS DC
+  oopsy: OOPSY
+
+# Raw responses from `python -m src.data.fetch_actuals --year 2026`.
+actuals: data/reports/preseason_2026/fangraphs_actuals_raw.json
+# Optional independent MLB cross-check.
+crosscheck: data/reports/preseason_2026/mlb_actuals_raw.json
+sources:
+  fangraphs: https://www.fangraphs.com/leaders/major-league?pos=all&stats=bat&lg=all&qual=0&type=8&season=2026&season1=2026&ind=0
+  mlb: https://statsapi.mlb.com/api/v1/stats?stats=season&group=hitting&season=2026&sportIds=1&gameType=R&playerPool=ALL&limit=2000
+
+# Season-specific commentary. Kept out of the generated findings.
+notes:
+  - >-
+    The primary Hydra forecast is the April 12 projections_mtl_2026.csv export;
+    the public CSVs are dated March 12, and the March 29 export is scored only as
+    a timing check. The merged model inputs stop at 2025, but model-development
+    timing cannot be independently established from these artifacts. The saved
+    priors parquet contains different forecasts and is not substituted for the
+    requested CSV.
+  - >-
+    Hydra values retain their saved precision (3 decimals for OBP/SLG; integer
+    counts); public exports retain original precision. FanGraphs' browser page
+    returned HTTP 403 during collection; its data API succeeded.

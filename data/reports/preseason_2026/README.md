@@ -4,19 +4,20 @@
 This compares the saved Hydra forecast with eight public systems and a repeat-2025
 baseline. It does not retrain or change a production model.
 
+The code is reusable for any season. See "Evaluate a new season" below.
+
 ## Verify from a clean checkout
 
 After installing the project's dependencies (`uv sync`), run from the repo root:
 
 ```bash
-uv run python data/reports/preseason_2026/verify_results.py
+uv run python scripts/evaluate_preseason.py --config configs/preseason_eval_2026.yaml --verify
 ```
 
 This command needs no network, model checkpoints, or untracked source caches.
-It independently recomputes every per-target and aggregate metric, playing-time
-metric, and paired bootstrap interval from the committed player-level snapshots.
-It also reconstructs the cohorts and checks the FanGraphs/MLB actuals comparison.
-It does not modify the report or other files.
+It recomputes every metric, playing-time metric, and paired bootstrap interval
+from the committed player-level snapshots with scikit-learn. It also rebuilds the
+cohorts and checks the FanGraphs/MLB actuals comparison. It does not modify files.
 
 ## Evidence
 
@@ -35,22 +36,32 @@ It does not modify the report or other files.
 
 ![Accuracy against naive persistence](accuracy_heatmap.png)
 
-## Rebuild from the original local caches
+## Rebuild 2026 from the original local caches
 
-`evaluate.py` is the original analysis driver. Unlike the portable verification
-command, it requires every original input listed in `evaluation.yaml` and
-`manifest.json`: the saved public projection CSVs, 2016–2025 merged parquet,
-2025 batting parquet, earlier Hydra export, and both raw API JSON responses.
-Those bulk caches remain untracked. Do not replace historical forecasts with
-fresh downloads; current public endpoints can return different forecasts.
-
-With the original caches restored, run from the repository root:
+The full run needs every input in `configs/preseason_eval_2026.yaml`. Those bulk
+caches stay untracked. Do not replace historical forecasts with fresh downloads,
+because current public endpoints can return different forecasts.
 
 ```bash
-uv run python data/reports/preseason_2026/evaluate.py
+uv run python scripts/evaluate_preseason.py --config configs/preseason_eval_2026.yaml
 ```
 
-That command rewrites the derived CSVs, plots, report and manifest in this folder.
-The report's narrative is specific to this frozen 2026 analysis, not a template
-for other seasons. The normalized MLB and earlier-Hydra verification snapshots
-are also rebuilt from their respective original sources.
+This rewrites the CSVs, plots, report and manifest in this folder, then runs the
+verifier. To rebuild only the report text from the committed tables, add
+`--report-only`.
+
+## Evaluate a new season
+
+1. Before Opening Day, save every forecast. Run `scripts/generate_projections.py`
+   (the export now includes `idfg`, `mlbam_id` and projected PA) and
+   `python -m src.data.fetch_projections --year <year>`.
+2. After the season, fetch actuals with
+   `python -m src.data.fetch_actuals --year <year>`. FanGraphs can block scripted
+   requests. If it does, the command prints the URL to save by hand.
+3. Copy `configs/preseason_eval_2026.yaml` to `preseason_eval_<year>.yaml`.
+   Update `year`, `output_dir`, the input paths, and `notes`. Remove
+   `legacy_id_match` and `hydra_alternate` if they do not apply.
+4. Run `scripts/evaluate_preseason.py --config configs/preseason_eval_<year>.yaml`.
+
+The findings text is generated from the result tables. Put season-specific
+commentary in the config's `notes`.
