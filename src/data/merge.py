@@ -103,7 +103,9 @@ def _map_by_name(players: pd.DataFrame, register: pd.DataFrame) -> pd.DataFrame:
         ]
         if len(hits) == 1:
             rows.append({"idfg": int(idfg), "mlbam_id": int(hits["key_mlbam"].iloc[0])})
-    return pd.DataFrame(rows, columns=["idfg", "mlbam_id"]).astype(int)
+    out = pd.DataFrame(rows, columns=["idfg", "mlbam_id"]).astype(int)
+    # Two FanGraphs IDs on one register row is a name clash, not a match.
+    return out[~out["mlbam_id"].duplicated(keep=False)]
 
 
 def build_id_map(
