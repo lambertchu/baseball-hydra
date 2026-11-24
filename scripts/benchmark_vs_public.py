@@ -250,7 +250,7 @@ def evaluate_year(
         data_config,
         model if rate_targets else None,
         None if projected_pa_all is None else projected_pa_all.loc[universe_df.index],
-        ext_loaded,
+        {s: ext_loaded.get(s) for s in systems},
         mtl_display,
     )
 
@@ -377,7 +377,7 @@ def _score_all_players(
     data_config: dict,
     model: object | None,
     learned_pa: pd.Series | None,
-    ext_loaded: dict[str, pd.DataFrame],
+    ext_loaded: dict[str, pd.DataFrame | None],
     mtl_display: str,
 ) -> dict[str, dict]:
     """Score PA and counting stats for every projected player.
@@ -388,7 +388,8 @@ def _score_all_players(
     - ``full``: every player in the universe; MTL (learned PA), MTL-Marcel
       and Naive, which cover everyone.
     - ``public``: the players every public system also projects, so public
-      systems are compared on identical rows.
+      systems are compared on identical rows. A year where any requested
+      system (``None`` in ``ext_loaded``) lacks projections has no public view.
     """
     raw_dir = Path(data_config.get("raw_data_dir", "data/raw"))
     actual_path = raw_dir / f"batting_{eval_year}.parquet"
@@ -400,6 +401,19 @@ def _score_all_players(
     idfg = universe_df["idfg"].astype(int)
     y_true = actual.set_index("idfg").reindex(idfg)[_ALL_PLAYER_STATS].fillna(0.0)
     y_true = y_true.reset_index(drop=True)
+
+    prior_path = raw_dir / f"batting_{eval_year - 1}.parquet"
+    if prior_path.exists():
+        prior = pd.read_parquet(prior_path, columns=["idfg", "pa"])
+        min_pa = data_config.get("min_pa_predict", 300)
+        eligible = set(prior.loc[prior["pa"] >= min_pa, "idfg"].astype(int))
+        unscored = len(eligible - set(idfg))
+        if unscored:
+            logger.warning(
+                "  All-players views miss %d of %d players with %d+ PA in %d: "
+                "they have no row in the merged feature data",
+                unscored, len(eligible), min_pa, eval_year - 1,
+            )
 
     full = {
         "Naive": universe_df[_ALL_PLAYER_STATS].astype(float).reset_index(drop=True)
@@ -417,20 +431,29 @@ def _score_all_players(
             for stat in _ALL_PLAYER_STATS[1:]:
                 mtl[stat] = rates[f"target_{stat}"].to_numpy() * pa
             full[name] = mtl[_ALL_PLAYER_STATS]
-    public = dict(full)
+    public: dict[str, pd.DataFrame] | None = dict(full)
     for system, lookup in ext_loaded.items():
         display = _SYSTEM_DISPLAY.get(system, system.capitalize())
-        missing = [c for c in _ALL_PLAYER_STATS if c not in lookup.columns]
+        missing = (
+            ["projections"]
+            if lookup is None
+            else [c for c in _ALL_PLAYER_STATS if c not in lookup.columns]
+        )
         if missing:
-            logger.warning("  All-players view skips %s: no %s", display, missing)
-            continue
+            # Pooled systems must share rows, so one gap drops the year's view.
+            logger.warning(
+                "  All-players public view skipped for %d: %s has no %s",
+                eval_year, display, missing,
+            )
+            public = None
+            break
         public[display] = (
             lookup.reindex(idfg)[_ALL_PLAYER_STATS].reset_index(drop=True)
         )
 
     views = {}
     for key, preds in [("full", full), ("public", public)]:
-        if key == "public" and len(public) == len(full):
+        if key == "public" and (preds is None or len(preds) == len(full)):
             continue
         view = _score_view(y_true, preds)
         if view is not None:

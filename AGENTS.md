@@ -333,10 +333,10 @@ MTL is **1.9% ahead of Steamer** and **2.0% behind ZiPS** on aggregate mean RMSE
 - Target winsorization (H13): -0.11% — negligible effect
 - Stat-specific aging curves (H14): +0.00% — excluded (no benefit on small dataset)
 
-**Preseason, all-players views** — every player with 300+ PA the prior season. A season with no MLB PA counts as 0, so playing-time misses are scored. Two views:
+**Preseason, all-players views** — every player with 300+ PA the prior season and a row in the merged feature data. A season with no MLB PA counts as 0, so playing-time misses are scored. The run warns how many prior-season players have no feature row. Two views:
 
 - **Full:** every such player. Scores MTL (learned PA), MTL-Marcel (same rates × Marcel PA) and Naive, which cover everyone.
-- **Public overlap:** the players every public system also projects, so all systems share rows.
+- **Public overlap:** the players every public system also projects, so all systems share rows. A year where any requested system has no projections is left out.
 
 Public-overlap view, pooled RMSE across 2022-2025 (1,111 player-seasons, 40 with 0 PA):
 
