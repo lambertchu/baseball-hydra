@@ -13,6 +13,9 @@ Covers:
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -21,6 +24,7 @@ from unittest.mock import patch
 
 from src.data.merge import (
     align_targets,
+    build_id_map,
     merge_batting_with_statcast,
     merge_context_data,
     merge_speed_data,
@@ -398,6 +402,36 @@ class TestMergeBattingStatcast:
         # Player 2 has NaN Statcast data
         row2 = merged[merged["mlbam_id"] == 2000].iloc[0]
         assert pd.isna(row2["avg_exit_velocity"])
+
+    def test_build_id_map_falls_back_to_unique_name(self, tmp_path, monkeypatch):
+        """IDs the register lacks map by unique name; a shared name stays unmapped."""
+        register = pd.DataFrame({
+            "name_first": ["Mike", "Carlos", "Luis", "Luis"],
+            "name_last": ["Trout", "Narváez", "Garcia", "Garcia"],
+            "key_mlbam": [545361, 665966, 1, 2],
+            "key_fangraphs": [10155, -1, -1, -1],
+            "mlb_played_first": [2011, 2024, 2020, 2021],
+            "mlb_played_last": [2025, 2025, 2025, 2025],
+        })
+        fake_pb = SimpleNamespace(
+            playerid_reverse_lookup=lambda ids, key_type: register[
+                register["key_fangraphs"].isin(ids)
+            ],
+            chadwick_register=lambda: register,
+        )
+        batting = pd.DataFrame({
+            "idfg": [10155, 19722, 999],
+            "name": ["Mike Trout", "Carlos Narvaez", "Luis García"],
+            "season": [2025, 2025, 2025],
+        })
+        monkeypatch.setitem(sys.modules, "pybaseball", fake_pb)
+        monkeypatch.setattr("src.data.merge._ID_MAP_CACHE", None)
+        id_map = build_id_map(batting, cache_path=tmp_path / "ids.parquet")
+
+        assert dict(zip(id_map["idfg"], id_map["mlbam_id"])) == {
+            10155: 545361,
+            19722: 665966,
+        }
 
 
 class TestMergeSpeedData:

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +76,38 @@ def _load_parquet_years(
     return pd.concat(frames, ignore_index=True)
 
 
+def _fold_name(name: str) -> str:
+    """Lowercase ASCII name without punctuation or a Jr./Sr./II-IV suffix."""
+    name = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode()
+    name = re.sub(r"[.']", "", name.lower()).strip()
+    name = re.sub(r"\s+(jr|sr|ii|iii|iv)$", "", name)
+    return re.sub(r"[\s-]+", " ", name).strip()
+
+
+def _map_by_name(players: pd.DataFrame, register: pd.DataFrame) -> pd.DataFrame:
+    """Map players to register rows that have an MLBAM ID but no FanGraphs ID.
+
+    A match needs the same folded name and an MLB career that overlaps the
+    player's seasons. A name with more than one match stays unmapped.
+    """
+    reg = register[(register["key_mlbam"] > 0) & (register["key_fangraphs"] < 0)]
+    reg_names = (reg["name_first"].fillna("") + " " + reg["name_last"].fillna("")).map(
+        _fold_name
+    )
+    rows = []
+    for idfg, p in players.groupby("idfg"):
+        hits = reg[
+            (reg_names == _fold_name(p["name"].iloc[0]))
+            & (reg["mlb_played_first"] <= p["season"].max())
+            & (reg["mlb_played_last"] >= p["season"].min())
+        ]
+        if len(hits) == 1:
+            rows.append({"idfg": int(idfg), "mlbam_id": int(hits["key_mlbam"].iloc[0])})
+    out = pd.DataFrame(rows, columns=["idfg", "mlbam_id"]).astype(int)
+    # Two FanGraphs IDs on one register row is a name clash, not a match.
+    return out[~out["mlbam_id"].duplicated(keep=False)]
+
+
 def build_id_map(
     batting_df: pd.DataFrame,
     cache_path: str | Path = "data/raw/id_map_cache.parquet",
@@ -81,14 +115,16 @@ def build_id_map(
     """Build a FanGraphs IDfg → MLBAM ID mapping table.
 
     Uses pybaseball.playerid_reverse_lookup to map all unique FanGraphs IDs
-    in the batting data to MLBAM IDs used by Statcast. Results are cached
-    to a Parquet file so subsequent runs skip the slow network call. New IDs
-    not present in the cache are looked up and appended.
+    in the batting data to MLBAM IDs used by Statcast. An ID the Chadwick
+    register has no FanGraphs key for yet (common for new debuts) falls back
+    to a unique name match. Results are cached to a Parquet file so
+    subsequent runs skip the slow network call. New IDs not present in the
+    cache are looked up and appended.
 
     Parameters
     ----------
     batting_df:
-        FanGraphs batting data with an ``idfg`` column.
+        FanGraphs batting data with ``idfg``, ``name`` and ``season`` columns.
     cache_path:
         Path to the persistent Parquet cache file.
 
@@ -139,6 +175,25 @@ def build_id_map(
     new_result["idfg"] = new_result["idfg"].astype(int)
     new_result["mlbam_id"] = new_result["mlbam_id"].astype(int)
     new_result = new_result.drop_duplicates(subset=["idfg"], keep="first")
+
+    # The register can lag months behind on FanGraphs IDs for new debuts.
+    missing = set(new_ids) - set(new_result["idfg"])
+    unmapped = batting_df[batting_df["idfg"].isin(missing)]
+    if not unmapped.empty:
+        by_name = _map_by_name(unmapped, pb.chadwick_register())
+        new_result = pd.concat([new_result, by_name], ignore_index=True)
+        hit = unmapped["idfg"].isin(by_name["idfg"])
+        if hit.any():
+            logger.info(
+                "  Mapped %d IDs by name: %s",
+                len(by_name), ", ".join(sorted(unmapped.loc[hit, "name"].unique())),
+            )
+        if not hit.all():
+            names = sorted(unmapped.loc[~hit, "name"].unique())
+            logger.warning(
+                "  No MLBAM ID for %d players, so they are dropped: %s",
+                len(names), ", ".join(names),
+            )
 
     # Merge with existing cache and persist
     if not cached.empty:
